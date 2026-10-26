@@ -1,0 +1,141 @@
+{
+  "as_of": "2026-10-26",
+  "us": {
+    "country": "US",
+    "as_of": "2026-10-26",
+    "rate_10y": 0.05,
+    "policy_rate": 0.0388,
+    "inflation_yoy": 0.03717250844268993,
+    "inflation_yoy_6m_ago": 0.032859577528651984,
+    "gdp_yoy": 0.021915745328897174,
+    "gdp_trend": 0.02502575385243877,
+    "unemployment": 0.042,
+    "sahm_gap": 0.0,
+    "breakeven_10y": 0.023399999999999997,
+    "credit_spread": 0.0147
+  },
+  "mx": {
+    "country": "MX",
+    "as_of": "2026-10-26",
+    "rate_10y": 0.0935,
+    "policy_rate": 0.065,
+    "inflation_yoy": 0.03454747622116616,
+    "inflation_yoy_6m_ago": 0.04586773593176252,
+    "gdp_yoy": 0.01925441348294643,
+    "gdp_trend": 0.01179986602973715,
+    "unemployment": 0.027479049999999998,
+    "sahm_gap": 0.0013139233333333334,
+    "breakeven_10y": null,
+    "credit_spread": null
+  },
+  "mx_extras": {
+    "fx_usd": 18.6638,
+    "fx_yoy": 0.006324643463726076,
+    "carry_vs_us": 0.0262,
+    "real_carry_vs_us": 0.028825032221523772,
+    "real_fx_gap": -0.10482541691305214
+  },
+  "world": {
+    "as_of": "2026-10-26",
+    "year": 2026,
+    "vix": 19.45,
+    "dollar_yoy": -0.0005412490248044577,
+    "brent_yoy": 0.7606968215158925,
+    "copper_yoy": 0.4480624668320956,
+    "g20_growth_median": 0.017,
+    "g20_breadth": 0.25,
+    "growth": {
+      "USA": 0.023,
+      "MEX": 0.015,
+      "CHN": 0.045,
+      "JPN": 0.006999999999999999,
+      "DEU": 0.013000000000000001,
+      "IND": 0.07,
+      "GBR": 0.013000000000000001,
+      "FRA": 0.004,
+      "ITA": 0.008,
+      "BRA": 0.022000000000000002,
+      "CAN": 0.011000000000000001,
+      "RUS": 0.009000000000000001,
+      "KOR": 0.033,
+      "AUS": 0.019,
+      "ESP": 0.025,
+      "IDN": 0.051,
+      "TUR": 0.027000000000000003,
+      "SAU": -0.033,
+      "ARG": 0.021,
+      "ZAF": 0.01
+    },
+    "inflation": {
+      "USA": 0.036000000000000004,
+      "MEX": 0.038,
+      "CHN": 0.01,
+      "JPN": 0.02,
+      "DEU": 0.027000000000000003,
+      "IND": 0.05,
+      "GBR": 0.033,
+      "FRA": 0.024,
+      "ITA": 0.033,
+      "BRA": 0.044000000000000004,
+      "CAN": 0.027999999999999997,
+      "RUS": 0.061,
+      "KOR": 0.027000000000000003,
+      "AUS": 0.039,
+      "ESP": 0.037000000000000005,
+      "IDN": 0.033,
+      "TUR": 0.312,
+      "SAU": 0.019,
+      "ARG": 0.325,
+      "ZAF": 0.044000000000000004
+    }
+  },
+  "vs_imf": [
+    {
+      "country": "US",
+      "year": 2026,
+      "gdp_ours": 0.021915745328897174,
+      "gdp_imf": 0.023,
+      "inflation_ours": 0.03717250844268993,
+      "inflation_imf": 0.036000000000000004
+    },
+    {
+      "country": "MX",
+      "year": 2026,
+      "gdp_ours": 0.01925441348294643,
+      "gdp_imf": 0.015,
+      "inflation_ours": 0.03454747622116616,
+      "inflation_imf": 0.038
+    }
+  ],
+  "assumptions": [
+    {
+      "market": "US",
+      "currency": "USD",
+      "risk_free_usd": 0.05,
+      "equity_risk_premium": 0.05,
+      "country_risk_premium": 0.0,
+      "expected_inflation": 0.023399999999999997,
+      "expected_inflation_usd": 0.023399999999999997,
+      "real_growth_long_run": 0.02502575385243877,
+      "terminal_growth": 0.04842575385243877,
+      "regime": "stagflation",
+      "flags": []
+    },
+    {
+      "market": "MX",
+      "currency": "MXN",
+      "risk_free_usd": 0.05,
+      "equity_risk_premium": 0.05,
+      "country_risk_premium": 0.05252748691099458,
+      "expected_inflation": 0.0314,
+      "expected_inflation_usd": 0.023399999999999997,
+      "real_growth_long_run": 0.01179986602973715,
+      "terminal_growth": 0.04319986602973715,
+      "regime": "goldilocks",
+      "flags": [
+        "política monetaria restrictiva (tasa real > 2%)",
+        "peso real >10% más fuerte que su promedio de 10 años (caro)"
+      ]
+    }
+  ]
+}
