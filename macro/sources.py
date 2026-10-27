@@ -1,4 +1,4 @@
-"""Where the macro data comes from: FRED, Banxico SIE and the IMF.
+"""Where the macro data comes from: FRED, Banxico SIE, the IMF and Yahoo Finance (indices).
 
 Every series the analysis reads is declared once in SERIES, with its source,
 its id there, and its publication lag. `load` cuts each series at as_of minus
@@ -52,6 +52,20 @@ SERIES: dict[str, dict[str, tuple[str, str, int]]] = {
         "brent": ("fred", "DCOILBRENTEU", 1),          # Brent, USD/bbl
         "copper": ("fred", "PCOPPUSDM", 45),           # copper, USD/t, monthly
     },
+    # Curves: tenor -> yield in %. Tenor keys end in d/m/y so markets.py can place them in years.
+    "US_CURVE": {t: ("fred", sid, 1) for t, sid in (
+        ("1m", "DGS1MO"), ("3m", "DGS3MO"), ("6m", "DGS6MO"), ("1y", "DGS1"), ("2y", "DGS2"), ("3y", "DGS3"),
+        ("5y", "DGS5"), ("7y", "DGS7"), ("10y", "DGS10"), ("20y", "DGS20"), ("30y", "DGS30"))},
+    "US_REAL": {t: ("fred", sid, 1) for t, sid in (("5y", "DFII5"), ("10y", "DFII10"), ("30y", "DFII30"))},
+    # Banxico weekly auction yields (CETES and fixed-rate Bonos M); a tenor is only auctioned every few weeks.
+    "MX_CURVE": {t: ("banxico", sid, 1) for t, sid in (
+        ("28d", "SF43936"), ("91d", "SF43939"), ("182d", "SF43942"), ("364d", "SF43945"), ("3y", "SF43883"),
+        ("5y", "SF43886"), ("10y", "SF44071"), ("20y", "SF45384"), ("30y", "SF60696"))},
+    # name -> Yahoo Finance ticker, daily closes in local currency.
+    "INDICES": {n: ("yahoo", t, 1) for n, t in (
+        ("S&P 500", "^GSPC"), ("Nasdaq", "^IXIC"), ("Dow Jones", "^DJI"), ("Russell 2000", "^RUT"),
+        ("IPC México", "^MXX"), ("Euro Stoxx 50", "^STOXX50E"), ("Nikkei 225", "^N225"), ("FTSE 100", "^FTSE"),
+        ("Emergentes (EEM)", "EEM"))},
 }
 
 # IMF World Economic Outlook: real GDP growth and average CPI inflation, % per year.
@@ -73,6 +87,8 @@ def fetch(source: str, series_id: str) -> pd.Series:
         return _fred(series_id)
     if source == "banxico":
         return _banxico(series_id)
+    if source == "yahoo":
+        return _yahoo(series_id)
     raise ValueError(f"unknown source {source!r}")
 
 
@@ -128,6 +144,25 @@ def _banxico(series_id: str) -> pd.Series:
         raise DataError("BANXICO_TOKEN is not set (free at https://www.banxico.org.mx/SieAPIRest/service/v1/token)")
     resp = _get(BANXICO_API.format(id=series_id), headers={"Bmx-Token": token})
     return parse_banxico(resp.json())
+
+
+def _yahoo(ticker: str) -> pd.Series:
+    import warnings
+
+    import yfinance as yf  # only the markets layer needs it
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # yfinance is noisy about pandas deprecations
+            df = yf.download(ticker, period="15y", interval="1d", auto_adjust=True, progress=False)
+    except Exception as exc:
+        raise DataError(f"Yahoo {ticker}: {exc}") from exc
+    if df is None or df.empty:
+        raise DataError(f"Yahoo {ticker}: no data")
+    close = df["Close"]
+    close = close.iloc[:, 0] if isinstance(close, pd.DataFrame) else close
+    close.index = pd.DatetimeIndex(close.index).tz_localize(None)
+    return close.dropna()
 
 
 def _get(url: str, **kwargs) -> requests.Response:

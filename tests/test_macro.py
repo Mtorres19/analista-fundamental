@@ -11,11 +11,25 @@ GROWING = {"CPIAUCSL": 0.03, "SP1": 0.04, "GDPC1": 0.02, "NGDPRSAXDCMXQ": 0.01,
            "DEXMXUS": 0.0, "DTWEXBGS": 0.0, "DCOILBRENTEU": 0.0, "PCOPPUSDM": 0.0}
 
 
+# Curves: an inverted Treasury curve (3m 5.0 > 10y 4.2), real 10y above 2%, a normal Mexican curve.
+CURVES = {"DGS1MO": 5.0, "DGS3MO": 5.0, "DGS6MO": 4.9, "DGS1": 4.8, "DGS2": 4.5, "DGS3": 4.4, "DGS5": 4.3,
+          "DGS7": 4.25, "DGS20": 4.4, "DGS30": 4.5, "DFII5": 2.1, "DFII10": 2.2, "DFII30": 2.3,
+          "SF43936": 8.0, "SF43939": 8.1, "SF43942": 8.2, "SF43945": 8.3, "SF43883": 8.6, "SF43886": 8.8,
+          "SF44071": 9.0, "SF45384": 9.3, "SF60696": 9.5}
+
+
 def fake_fetch(source: str, sid: str) -> pd.Series:
     quarterly = sid in ("GDPC1", "NGDPRSAXDCMXQ")
     idx = pd.date_range("2010-01-01", "2026-12-31", freq="QS" if quarterly else "MS")
     if sid in LEVELS:
         return pd.Series(LEVELS[sid], index=idx)
+    if sid in CURVES:
+        return pd.Series(CURVES[sid], index=idx)
+    if source == "yahoo":  # indices grow 8% a year; the IPC falls 20% from June 2026
+        s = pd.Series([1000 * 1.08 ** (i / 12) for i in range(len(idx))], index=idx)
+        if sid == "^MXX":
+            s[s.index >= "2026-06-01"] *= 0.8
+        return s
     per_year = 4 if quarterly else 12
     base = 18.0 if sid == "DEXMXUS" else 100.0
     return pd.Series([base * (1 + GROWING[sid]) ** (i / per_year) for i in range(len(idx))], index=idx)
@@ -149,3 +163,27 @@ def test_yoy_pct_skips_missing_month():
     yoy = _yoy_pct(s).dropna()
     assert pd.Timestamp("2025-10-01") not in yoy.index
     assert yoy[pd.Timestamp("2025-11-01")] == (s["2025-11-01"] / s["2024-11-01"] - 1) * 100
+
+
+def test_recession_probability_probit():
+    from macro.markets import recession_probability
+    assert recession_probability(0) == pytest.approx(0.297, abs=1e-3)
+    assert recession_probability(-1) == pytest.approx(0.540, abs=1e-3)
+    assert recession_probability(2) < recession_probability(0) < recession_probability(-1)
+
+
+def test_markets_cross_feeds(report):
+    from macro.markets import build_markets
+    m = build_markets(report, fake_fetch)
+    assert m.us_3m10y == pytest.approx(-0.8)
+    assert m.recession_prob == pytest.approx(0.5, abs=0.05)
+    assert m.us_policy_gap == pytest.approx(4.5 - 4.3)        # 2y over fed funds
+    assert m.mx_spread_10y == pytest.approx(9.0 - 4.2)
+    assert m.mx_us_spread["1y"] == pytest.approx(8.3 - 4.8)
+    assert m.us_curve.years[0] == pytest.approx(1 / 12)
+    flags = m.flags
+    assert any("invertida" in f for f in flags["EE.UU."])
+    assert any("tasa real" in f for f in flags["EE.UU."])
+    assert any("IPC México" in f for f in flags["México"])
+    ipc = next(i for i in m.indices if i.name == "IPC México")
+    assert ipc.drawdown == pytest.approx(-0.2, abs=0.01) and ipc.cost_of_equity == report.assumptions[1].cost_of_equity()
