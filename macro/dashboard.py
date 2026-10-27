@@ -268,20 +268,22 @@ HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Panorama macro</title>
+<meta name="claude:viewport-fit-sides" content="cover">
 <style>
 :root, :root[data-theme="dark"] {
   --bg: #000; --panel: #0b0b10; --line: #1f1f2b; --text: #f2f2f7; --muted: #8b8ba3;
-  --good: #a6ff00; --bad: #ff2b6a; --neutral: #00e5ff; --accent: #ff2bd6;
+  --good: #a6ff00; --bad: #ff2b6a; --neutral: #00e5ff; --accent: #ff2bd6; color-scheme: dark;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text);
   font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-main { max-width: 1280px; margin: 0 auto; padding: 24px 16px 64px; }
+main { max-width: 1280px; margin: 0 auto; padding-block: 24px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
 header h1 { margin: 0; font-size: 28px; letter-spacing: -0.02em; }
 header h1 span { background: linear-gradient(90deg, #00e5ff, #ff2bd6, #a6ff00); -webkit-background-clip: text;
   background-clip: text; color: transparent; }
 header p { margin: 4px 0 0; color: var(--muted); }
-nav { position: sticky; top: 0; z-index: 5; background: var(--bg); display: flex; gap: 8px; flex-wrap: wrap;
+nav { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); display: flex; gap: 8px; flex-wrap: wrap;
   padding: 12px 0; margin: 12px 0 8px; border-bottom: 1px solid var(--line); }
 nav a { color: var(--text); text-decoration: none; padding: 6px 12px; border: 1px solid var(--line);
   border-radius: 999px; font-size: 13px; }
