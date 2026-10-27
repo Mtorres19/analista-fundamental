@@ -8,7 +8,7 @@ import pandas as pd
 from pydantic import BaseModel
 
 from macro import sources
-from macro.assumptions import DEFAULT_ERP, MarketAssumptions, mx_assumptions, us_assumptions
+from macro.assumptions import MarketAssumptions, equity_bond_vol_ratio, mx_assumptions, us_assumptions
 from macro.snapshot import (Comparison, CountrySnapshot, GlobalSnapshot, MexicoExtras, build_country,
                             build_global, build_mexico_extras, compare_with_imf)
 
@@ -25,7 +25,7 @@ class MacroReport(BaseModel):
     assumptions: list[MarketAssumptions]
 
 
-def build_report(as_of: str, erp: float = DEFAULT_ERP, fetch: sources.Fetch = sources.fetch,
+def build_report(as_of: str, erp: float | None = None, fetch: sources.Fetch = sources.fetch,
                  weo_fetch: WeoFetch = sources.imf_weo) -> MacroReport:
     us_s, mx_s = sources.load("US", as_of, fetch), sources.load("MX", as_of, fetch)
     weo = {ind: weo_fetch(ind) for ind in sources.IMF_INDICATORS}
@@ -33,12 +33,16 @@ def build_report(as_of: str, erp: float = DEFAULT_ERP, fetch: sources.Fetch = so
     extras = build_mexico_extras(mx_s, us_s, mx, us)
     world = build_global(as_of, sources.load("GLOBAL", as_of, fetch), weo)
 
-    year = int(as_of[:4])
-    mx_infl = weo["PCPIPCH"].loc[year + 1:year + 5, "MEX"].dropna()
-    if mx_infl.empty:
-        raise sources.DataError(f"IMF WEO has no Mexico inflation projection after {year}")
-    us_a = us_assumptions(us, erp)
-    mx_a = mx_assumptions(mx, us_a, float(mx_infl.mean()) / 100, erp, extra_flags=extras.flags)
+    # Valuation inputs from the market and the consensus: Damodaran's implied ERP (unless one is given), the
+    # Banxico survey for peso inflation, EM credit spread x IPC/Bono M volatility for country risk.
+    if erp is None:
+        erp = float(sources.load("EXTERNAL", as_of, fetch)["implied_erp"].iloc[-1]) / 100
+    cons = sources.load("CONSENSUS", as_of, fetch)
+    spread = float(sources.load("RISK", as_of, fetch)["em_corp_oas"].iloc[-1]) / 100
+    vol = equity_bond_vol_ratio(sources.load("INDICES", as_of, fetch)["IPC México"], mx_s["rate_10y"])
+    us_a = us_assumptions(us, erp, long_run_growth=float(cons["us_gdp_lr"].iloc[-1]) / 100)
+    mx_a = mx_assumptions(mx, us_a, float(cons["mx_infl_1_4y"].iloc[-1]) / 100, float(cons["mx_infl_5_8y"].iloc[-1]) / 100,
+                          spread, vol, erp, extra_flags=extras.flags, long_run_growth=float(cons["mx_gdp_10y"].iloc[-1]) / 100)
     return MacroReport(
         as_of=as_of[:10], us=us, mx=mx, mx_extras=extras, world=world,
         vs_imf=[compare_with_imf(us, "USA", weo), compare_with_imf(mx, "MEX", weo)],

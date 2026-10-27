@@ -25,6 +25,7 @@ import requests
 FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 BANXICO_API = "https://www.banxico.org.mx/SieAPIRest/service/v1/series/{id}/datos"
 IMF_API = "https://www.imf.org/external/datamapper/api/v1/{indicator}"
+DAMODARAN_ERP = "https://pages.stern.nyu.edu/~adamodar/pc/implprem/ERPbymonth.xlsx"
 HLW_XLSX = "https://www.newyorkfed.org/medialibrary/media/research/economists/williams/data/Holston_Laubach_Williams_current_estimates.xlsx"
 
 # region -> name -> (source, series id, publication lag in days).
@@ -46,6 +47,7 @@ SERIES: dict[str, dict[str, tuple[str, str, int]]] = {
         "unemployment": ("fred", "LRHUTTTTMXM156S", 60),  # %, monthly (OECD)
         "gdp": ("fred", "NGDPRSAXDCMXQ", 150),         # real GDP, quarterly
         "fx_usd": ("fred", "DEXMXUS", 1),              # pesos per dollar, daily
+        "reer": ("fred", "RBMXBIS", 75),               # BIS real broad effective exchange rate, monthly; up = stronger
     },
     "GLOBAL": {
         "vix": ("fred", "VIXCLS", 1),                  # S&P 500 implied vol
@@ -102,11 +104,25 @@ SERIES: dict[str, dict[str, tuple[str, str, int]]] = {
     # Daily prices for the market charts where the macro series is monthly.
     "DAILY": {"copper": ("yahoo", "HG=F", 1)},     # COMEX copper future, USD per pound
     "RISK": {
-        "em_corp_oas": ("fred", "BAMLEMCBPIOAS", 1),     # ICE BofA EM corporate OAS, pp
+        "em_corp_oas": ("fred", "BAMLEMCBPIOAS", 1),     # ICE BofA EM corporate OAS, pp; Mexico's default spread proxy
         "us_hy_oas": ("fred", "BAMLH0A0HYM2", 1),        # ICE BofA US high yield OAS, pp
     },
-    # NY Fed Holston-Laubach-Williams one-sided estimates, quarterly dated at the quarter's start.
-    "EXTERNAL": {"hlw_rstar_us": ("nyfed", "rstar", 120)},
+    # NY Fed Holston-Laubach-Williams one-sided estimates, quarterly dated at the quarter's start;
+    # Damodaran's implied ERP of the S&P 500 (trailing 12m cash yield), monthly.
+    "EXTERNAL": {"hlw_rstar_us": ("nyfed", "rstar", 120), "implied_erp": ("damodaran", "ERP (T12 m with sustainable payout)", 5)},
+    # Outside views the forecasts are anchored to. Banxico survey of private-sector economists (medians, monthly),
+    # Fed SEP longer-run medians, US 5y breakeven.
+    "CONSENSUS": {
+        "mx_infl_12m": ("banxico", "SR14195", 35), "mx_infl_1_4y": ("banxico", "SR14209", 35),
+        "mx_infl_5_8y": ("banxico", "SR14216", 35), "mx_gdp_10y": ("banxico", "SR14469", 35),
+        "mx_cete28_t": ("banxico", "SR14749", 35), "mx_cete28_t1": ("banxico", "SR14756", 35),
+        "us_gdp_lr": ("fred", "GDPC1MDLR", 1), "us_unemp_lr": ("fred", "UNRATEMDLR", 1),
+        "us_breakeven_5y": ("fred", "T5YIE", 1),
+    },
+    # Futures curves: price by contract month (index = delivery month, not a quote date), so they are fetched
+    # directly, never through load(). Fed funds: rate = 100 - price.
+    "FUTURES": {"fed_funds": ("yahoo_curve", "ZQ.CBT", 0), "brent": ("yahoo_curve", "BZ.NYM", 0),
+                "copper": ("yahoo_curve", "HG.CMX", 0)},
 }
 
 # IMF World Economic Outlook: real GDP growth and average CPI inflation, % per year.
@@ -132,6 +148,10 @@ def fetch(source: str, series_id: str) -> pd.Series:
         return _yahoo(series_id)
     if source == "nyfed":
         return parse_hlw(_get(HLW_XLSX).content)
+    if source == "damodaran":
+        return parse_damodaran_erp(_get(DAMODARAN_ERP).content, series_id)
+    if source == "yahoo_curve":
+        return _yahoo_curve(series_id)
     raise ValueError(f"unknown source {source!r}")
 
 
@@ -173,6 +193,20 @@ def parse_hlw(xlsx: bytes) -> pd.Series:
     except Exception as exc:
         raise DataError(f"NY Fed HLW: unexpected workbook layout ({exc})") from exc
     return pd.Series(body.iloc[:, 1].astype(float).values, index=pd.to_datetime(body.iloc[:, 0]))
+
+
+def parse_damodaran_erp(xlsx: bytes, column: str) -> pd.Series:
+    """One column of Damodaran's ERPbymonth workbook, in %, indexed by start of month."""
+    try:
+        df = pd.read_excel(io.BytesIO(xlsx), header=0)
+        out = pd.to_numeric(df[column], errors="coerce") * 100
+        out.index = pd.to_datetime(df["Start of month"], errors="coerce")
+        out = out[out.index.notna()].dropna()
+    except Exception as exc:
+        raise DataError(f"Damodaran ERP: unexpected workbook layout ({exc})") from exc
+    if out.empty:
+        raise DataError(f"Damodaran ERP: no {column} values")
+    return out
 
 
 def parse_banxico(payload: dict, series_id: str | None = None) -> pd.Series:
@@ -232,6 +266,29 @@ def _yahoo(ticker: str) -> pd.Series:
     close = close.iloc[:, 0] if isinstance(close, pd.DataFrame) else close
     close.index = pd.DatetimeIndex(close.index).tz_localize(None)
     return close.dropna()
+
+
+def _yahoo_curve(root: str) -> pd.Series:
+    """Last close of each futures contract for the next 15 delivery months, e.g. 'BZ.NYM' -> BZZ26.NYM, BZF27.NYM..."""
+    import warnings
+
+    import yfinance as yf
+
+    code, exch = root.split(".")
+    start = pd.Timestamp.today().normalize().replace(day=1)
+    months = [start + pd.DateOffset(months=k) for k in range(15)]
+    tickers = {f"{code}{'FGHJKMNQUVXZ'[m.month - 1]}{m.year % 100:02d}.{exch}": m for m in months}
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            df = yf.download(list(tickers), period="10d", interval="1d", progress=False, auto_adjust=False)["Close"]
+    except Exception as exc:
+        raise DataError(f"Yahoo futures {root}: {exc}") from exc
+    last = df.ffill().iloc[-1].dropna() if df is not None and not df.empty else pd.Series(dtype=float)
+    out = pd.Series({tickers[t]: float(v) for t, v in last.items() if t in tickers}).sort_index()
+    if len(out) < 6:
+        raise DataError(f"Yahoo futures {root}: only {len(out)} contracts quoted")
+    return out
 
 
 def _get(url: str, **kwargs) -> requests.Response:

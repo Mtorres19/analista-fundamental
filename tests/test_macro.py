@@ -31,7 +31,10 @@ for ids, cpn, periods in ((("SF45427", "SF45449", "SF45475"), 8.6, 6), (("SF4542
 # Activity, external and risk series: flat levels (zero growth) are enough for the cross-feeds under test.
 ECON = {"BOPGSTB": -60000, "IEABC": -250000, "INDPRO": 100, "RSAFS": 700000, "PAYEMS": 150000, "UMCSENT": 60,
         "EXPINF1YR": 2.5, "SE44352": -2000, "SE44355": 150000, "SE44374": 140000, "SE27803": 5000, "SF43707": 230000,
-        "SR17692": 110, "BAMLEMCBPIOAS": 2.0, "BAMLH0A0HYM2": 6.0, "rstar": 0.8}
+        "SR17692": 110, "BAMLEMCBPIOAS": 2.0, "BAMLH0A0HYM2": 6.0, "rstar": 0.8,
+        # Consensus, Damodaran ERP (%), BIS real effective peso.
+        "SR14195": 4.1, "SR14209": 3.8, "SR14216": 3.7, "SR14469": 1.8, "SR14749": 7.5, "SR14756": 7.0,
+        "GDPC1MDLR": 1.8, "UNRATEMDLR": 4.0, "T5YIE": 2.4, "ERP (T12 m with sustainable payout)": 4.2, "RBMXBIS": 100.0}
 
 
 def fake_fetch(source: str, sid: str) -> pd.Series:
@@ -45,6 +48,9 @@ def fake_fetch(source: str, sid: str) -> pd.Series:
         return pd.Series(float(VECTOR[sid]), index=idx)
     if sid in ECON:
         return pd.Series(float(ECON[sid]), index=idx)
+    if source == "yahoo_curve":  # futures by delivery month: Fed funds at 95.5 (4.5%), commodities flat
+        months = pd.date_range("2026-07-01", periods=15, freq="MS")
+        return pd.Series(95.5 if sid.startswith("ZQ") else 80.0, index=months)
     if source == "yahoo":  # indices grow 8% a year; the IPC falls 20% from June 2026
         s = pd.Series([1000 * 1.08 ** (i / 12) for i in range(len(idx))], index=idx)
         if sid == "^MXX":
@@ -87,8 +93,9 @@ def test_mexico_extras(report):
     e = report.mx_extras
     assert e.carry_vs_us == pytest.approx(0.037)
     assert e.real_carry_vs_us == pytest.approx(0.04 - 0.013, abs=1e-6)
-    # Flat nominal peso + higher MX inflation => real peso keeps appreciating: below its 10y average.
-    assert e.real_fx_gap < 0
+    # Flat nominal peso + higher MX inflation => the bilateral real peso keeps appreciating: below its 10y average.
+    assert e.real_fx_gap_bilateral < 0
+    assert e.real_fx_gap == pytest.approx(0.0)   # the BIS index is flat in the fixture
 
 
 def test_global_and_imf_comparison(report):
@@ -103,14 +110,28 @@ def test_assumptions(report):
     us, mx = report.assumptions
     assert us.cost_of_equity() == pytest.approx(0.042 + 0.05)
     assert us.cost_of_equity(1.5) == pytest.approx(0.042 + 0.075)
-    assert us.terminal_growth == pytest.approx(0.042)  # 2.3% + 2% = 4.3%, capped at the 10y
+    assert us.terminal_growth == pytest.approx(0.041)  # breakeven 2.3% + Fed long-run growth 1.8% = 4.1%, under the 10y
 
-    # MX 10y 9% in dollars: 1.09 * 1.023 / 1.04 - 1 = 7.22%; spread over 4.2% = 3.02pp; x1.5
-    spread = 1.09 * 1.023 / 1.04 - 1 - 0.042
-    assert mx.country_risk_premium == pytest.approx(spread * 1.5)
-    usd = 0.042 + 0.05 + spread * 1.5
-    assert mx.cost_of_equity() == pytest.approx((1 + usd) * 1.04 / 1.023 - 1)
-    assert mx.terminal_growth == pytest.approx(0.04 + 0.01, abs=1e-6)
+    # CRP = default spread (EM corporate OAS 2.0%) x vol ratio; the fixture's flat 10y has no volatility, so the
+    # ratio falls back to 1.5. Converted to pesos once, with the survey's 1-4y inflation (3.8%) vs the breakeven.
+    assert mx.default_spread == pytest.approx(0.02) and mx.equity_bond_vol == pytest.approx(1.5)
+    assert mx.country_risk_premium == pytest.approx(0.03)
+    usd = 0.042 + 0.05 + 0.03
+    assert mx.cost_of_equity() == pytest.approx((1 + usd) * 1.038 / 1.023 - 1)
+    # Terminal: the survey's 10y real growth (1.8%) + its 5-8y inflation (3.7%); our own trend (1%) kept alongside.
+    assert mx.terminal_growth == pytest.approx(0.018 + 0.037, abs=1e-6)
+    assert mx.real_growth_ours == pytest.approx(0.01, abs=1e-4)
+
+
+def test_equity_bond_vol_ratio():
+    import numpy as np
+    from macro.assumptions import equity_bond_vol_ratio
+    idx = pd.date_range("2018-01-01", periods=96, freq="MS")
+    rng = np.random.default_rng(0)
+    eq = pd.Series(np.exp(np.cumsum(rng.normal(0, 0.04, 96))), index=idx)     # 4% monthly equity vol
+    y = pd.Series(8 + np.cumsum(rng.normal(0, 0.25, 96)), index=idx)          # 25bp monthly -> 1.6% bond vol
+    assert equity_bond_vol_ratio(eq, y) == pytest.approx(0.04 / (6.5 * 0.0025), rel=0.25)
+    assert equity_bond_vol_ratio(eq.iloc[-12:], y.iloc[-12:]) == 1.5       # too little history: global ratio
 
 
 def test_publication_lag_hides_unreleased_prints():
@@ -219,8 +240,10 @@ def test_neutral_rate_and_stance(report):
     assert us.external == pytest.approx(0.8)
     # MX: trend 1%, real = 8.0 - 4.0 inflation = 4.0 -> r* 2.5, nominal 5.5, policy 8.0: restrictive.
     assert mx.rstar == pytest.approx(2.5, abs=1e-6) and mx.stance == "restrictiva"
+    # Taylor: 5.5 nominal + 0.5 x (4.0 - 3.0) inflation gap + 0 (unemployment at its average) = 6.0.
+    assert mx.taylor == pytest.approx(6.0, abs=1e-6)
     path = mx.path(pd.date_range("2026-07-01", periods=12, freq="MS"))
-    assert path.iloc[-1] == pytest.approx(mx.nominal + mx.gap / 2)   # the gap halves in a year
+    assert path.iloc[-1] == pytest.approx(mx.taylor + (mx.policy - mx.taylor) / 2)   # the distance halves in a year
     idx = pd.date_range("2020-01-01", periods=12, freq="MS")
     with pytest.raises(sources.DataError):
         neutral_from("US", pd.Series(4.0, index=idx), pd.Series(2.0, index=idx), 2.0, None, "")

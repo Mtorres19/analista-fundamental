@@ -14,7 +14,6 @@ import numpy as np
 import pandas as pd
 
 from macro import sources
-from macro.assumptions import DEFAULT_ERP
 from macro.forecast import forecast
 from macro.economy import Economy, build_economy
 from macro.economy import reasons as economy_reasons
@@ -34,28 +33,37 @@ REGIME_TEXT = {
 }
 
 
-def build_dashboard(as_of: str, erp: float = DEFAULT_ERP, fetch: sources.Fetch = sources.fetch,
+def build_dashboard(as_of: str, erp: float | None = None, fetch: sources.Fetch = sources.fetch,
                     weo_fetch: WeoFetch = sources.imf_weo) -> str:
     fetch, weo_fetch = cache(fetch), cache(weo_fetch)  # the report and the charts read the same series once
     r = build_report(as_of, erp=erp, fetch=fetch, weo_fetch=weo_fetch)
     m = build_markets(r, fetch)
     n = build_neutral(r, fetch)
-    s = {reg: sources.load(reg, as_of, fetch) for reg in sources.SERIES}
+    s = {reg: sources.load(reg, as_of, fetch) for reg in sources.SERIES if reg != "FUTURES"}
     weo = {ind: weo_fetch(ind) for ind in sources.IMF_INDICATORS}
     e = build_economy(r, weo, fetch)
+    cons = s["CONSENSUS"]
     year = int(as_of[:4])
 
     charts, forecasts = {}, []
 
-    def add(key, title, unit, hist, freq="MS", imf=None, extra=(), market=None, anchor=None, chart=True, daily=None):
-        """anchor: (label, index -> Series), a path the macro side implies (neutral rate, cost of equity).
+    def add(key, title, unit, hist, freq="MS", imf=None, extra=(), market=None, anchor=None, chart=True, daily=None,
+            outside=None):
+        """anchor: (label, index -> Series), a path the macro side implies (Taylor rate, cost of equity).
+        outside: (label, Series by date), the market's or the consensus's path (futures, expectations, survey);
+        when given, the headline forecast is the average of our AR model and it, and our two pure models stay drawn.
         daily: the same series day by day, drawn instead of the monthly history (models still fit monthly)."""
         fc = forecast(hist, 4 if freq == "QS" else 12, freq)
         if anchor is not None:
             fc["anchor"] = anchor[1](fc.index)
+        if outside is not None:
+            fc["outside"] = _along(outside[1], float(hist.iloc[-1]), hist.index[-1], fc.index)
+            fc["ensemble"] = (fc["ar1"] + fc["outside"]) / 2
+            fc["lo"], fc["hi"] = np.minimum(fc["lo"], fc["outside"]), np.maximum(fc["hi"], fc["outside"])
+            market = float(fc["outside"].iloc[-1])
         if chart:
             charts[key] = _chart(title, unit, hist if daily is None else _recent(daily.dropna(), 5), fc, imf, extra,
-                                 anchor[0] if anchor else None)
+                                 anchor[0] if anchor else None, outside[0] if outside else None)
             charts[key]["daily"] = daily is not None
         end = fc.iloc[-1]
         forecasts.append({"name": title, "unit": unit, "now": float(hist.iloc[-1]), "drift": end.drift,
@@ -69,16 +77,24 @@ def build_dashboard(as_of: str, erp: float = DEFAULT_ERP, fetch: sources.Fetch =
         imf_g = _imf_points(weo["NGDP_RPCH"], iso, year)
         imf_i = _imf_points(weo["PCPIPCH"], iso, year)
         be = _recent(_monthly(d["breakeven_10y"])) if "breakeven_10y" in d else None
+        # Outside view at 12 months: Cleveland Fed 1y expectation (US), Banxico survey next-12-months median (MX).
+        expected_12m = float(s["US_ECON"]["inflation_exp_1y"].iloc[-1]) if c == "US" else float(cons["mx_infl_12m"].iloc[-1])
         add(f"{c}_infl", f"Inflación {name}", "%", _recent(_yoy_pct(_monthly(d["cpi"]))),
             imf=imf_i, extra=[("Inflación esperada 10a (mercado)", be)] if be is not None else (),
-            market=float(be.iloc[-1]) if be is not None else None)
+            outside=("Fed de Cleveland, 1 año" if c == "US" else "Encuesta Banxico, 12 meses",
+                     _at_horizon(expected_12m, d["cpi"].index[-1], 12)))
         extra = [("Bono 10 años", _recent(_monthly(d["rate_10y"])))]
         if c == "MX":
             extra.append(("Tasa Fed (EE.UU.)", _recent(_monthly(s["US"]["policy_rate"]))))
         # Market-implied path: where the 2y Treasury / 1y CETES sit against today's policy rate.
-        implied = m.us_curve.at("2y") if c == "US" else m.mx_curve.at("364d")
-        add(f"{c}_rate", f"Tasa de política {name}", "%", _recent(_monthly(d["policy_rate"])), extra=extra, market=implied,
-            anchor=("Convergencia a la tasa neutral", n[c].path))
+        # Outside view: Fed funds futures (US); Banxico survey of the Cete 28 at year end (MX), not the raw Cetes
+        # forward, which carries a term premium.
+        outside = (("Futuros de Fed funds", 100 - sources.fetch("yahoo_curve", "ZQ.CBT")) if c == "US" else
+                   ("Encuesta Banxico, Cete 28 al cierre", pd.Series(
+                       [float(cons["mx_cete28_t"].iloc[-1]), float(cons["mx_cete28_t1"].iloc[-1])],
+                       index=[pd.Timestamp(year, 12, 1), pd.Timestamp(year + 1, 12, 1)])))
+        add(f"{c}_rate", f"Tasa de política {name}", "%", _recent(_monthly(d["policy_rate"])), extra=extra,
+            anchor=("Regla de Taylor (neutral + brechas)", n[c].path), outside=outside)
         add(f"{c}_unemp", f"Desempleo {name}", "%", _recent(_monthly(d["unemployment"])))
         gdp = d["gdp"].resample("QS").last().dropna()
         add(f"{c}_gdp", f"PIB real anual {name}", "%", _recent(_yoy_pct(gdp)), "QS", imf=imf_g)
@@ -86,7 +102,9 @@ def build_dashboard(as_of: str, erp: float = DEFAULT_ERP, fetch: sources.Fetch =
     for key, title, ser in (("MX_fx", "Pesos por dólar", s["MX"]["fx_usd"]), ("brent", "Petróleo Brent (USD/barril)", g["brent"]),
                             ("copper", "Cobre (USD/libra, futuro COMEX)", dly["copper"]),
                             ("dollar", "Dólar amplio (índice)", g["dollar"]), ("vix", "VIX (miedo del mercado)", g["vix"])):
-        add(key, title, "", _recent(_monthly(ser)), daily=ser)
+        fut = {"brent": "BZ.NYM", "copper": "HG.CMX"}.get(key)
+        add(key, title, "", _recent(_monthly(ser)), daily=ser,
+            outside=("Curva de futuros", sources.fetch("yahoo_curve", fut)) if fut else None)
     for ix in m.indices:
         last = float(s["INDICES"][ix.name].iloc[-1])
         # The macro side's required return, compounded monthly from the last close.
@@ -152,7 +170,8 @@ def reasons(r: MacroReport, forecasts: list[dict], m: Markets, n: dict[str, Neut
         out[name].append(f"Tasa neutral: nuestro r* es {x.rstar:.2f}% real (promedio de crecimiento tendencial {x.trend_growth:.2f}% "
                          f"y tasa real ex ante de 10 años {x.avg_real_rate:.2f}%); la referencia externa ({x.external_label}) da "
                          f"{x.external:.2f}%. Con la meta de {x.target:.0f}%, la neutral nominal es {x.nominal:.2f}% y la tasa está "
-                         f"en {x.policy:.2f}%: {x.gap:+.2f} pp, postura {x.stance}. El pronóstico agrega la convergencia a la neutral.")
+                         f"en {x.policy:.2f}%: {x.gap:+.2f} pp, postura {x.stance}. "
+                         f"La regla de Taylor, con inflación de {x.inflation:.2f}% y desempleo de {x.unemployment:.2f}% contra {x.unemployment_star:.2f}% de largo plazo, pide {x.taylor:.2f}%.")
     out["EE.UU."].append(f"La curva (3m10y en {m.us_3m10y:+.2f} pp) da {m.recession_prob:.0%} de probabilidad de recesión en "
                          f"12 meses, y el bono a 2 años ({m.us_curve.at('2y'):.2f}%) "
                          + ("descuenta recortes de la Fed." if m.us_policy_gap < -0.15 else "descuenta alzas de la Fed."
@@ -162,21 +181,27 @@ def reasons(r: MacroReport, forecasts: list[dict], m: Markets, n: dict[str, Neut
         f"El carry contra EE.UU. es de {_p(e.carry_vs_us)} ({_p(e.real_carry_vs_us)} real): "
         + ("pagar más que la Fed atrae dinero de fuera a pesos y sostiene al peso." if e.real_carry_vs_us > 0.01
            else "el premio por estar en pesos es chico, el peso queda vulnerable a salidas de capital."),
-        f"El peso real está {_p(abs(e.real_fx_gap))} {'más fuerte' if e.real_fx_gap < 0 else 'más débil'} que su "
-        "promedio de 10 años: " + ("abarata importaciones y ayuda a bajar la inflación, pero resta competitividad "
+        f"El peso real (tipo de cambio real efectivo del BIS, contra todos sus socios) está {_p(abs(e.real_fx_gap))} "
+        f"{'más fuerte' if e.real_fx_gap < 0 else 'más débil'} que su promedio de 10 años; solo contra el dólar, "
+        f"{_p(abs(e.real_fx_gap_bilateral))} {'más fuerte' if e.real_fx_gap_bilateral < 0 else 'más débil'}. " + ("Un peso caro abarata importaciones y ayuda a bajar la inflación, pero resta competitividad "
                                    "a exportadores y al turismo." if e.real_fx_gap < 0
-                                   else "encarece importaciones y empuja precios, pero favorece a exportadores."),
+                                   else "Un peso barato encarece importaciones y empuja precios, pero favorece a exportadores."),
     ]
     a_us, a_mx = r.assumptions
     out["Supuestos"] = [
         f"El costo de capital en dólares ({_p(a_us.cost_of_equity())}) sale de la tasa a 10 años de EE.UU. "
-        f"({_p(a_us.risk_free_usd)}) más una prima de mercado de {_p(a_us.equity_risk_premium)}.",
-        f"En México se suma un riesgo país de {_p(a_mx.country_risk_premium)} (diferencial soberano real ×1.5) y se "
-        f"convierte a pesos con la brecha de inflación esperada ({_p(a_mx.expected_inflation)} vs "
-        f"{_p(a_us.expected_inflation)}): por eso exige {_p(a_mx.cost_of_equity())}.",
-        f"El crecimiento terminal se topa con la tasa a 10 años local: {_p(a_us.terminal_growth)} en EE.UU. y "
-        f"{_p(a_mx.terminal_growth)} en México. Si una empresa necesita crecer más que eso para valer su precio, "
-        "la valuación es exigente.",
+        f"({_p(a_us.risk_free_usd)}) más la prima de mercado implícita del S&P 500 que publica Damodaran "
+        f"({_p(a_us.equity_risk_premium)}; antes usábamos un 5% fijo).",
+        f"En México se suma un riesgo país de {_p(a_mx.country_risk_premium)}: el spread de impago, medido con el spread de "
+        f"bonos corporativos emergentes ({_p(a_mx.default_spread)}, porque no hay CDS soberano gratuito), por "
+        f"{a_mx.equity_bond_vol:.2f}, cuánto más volátil es el IPC que el Bono M a 10 años en 5 años de datos. "
+        f"Después se convierte a pesos una sola vez, con la inflación esperada de la encuesta de Banxico "
+        f"({_p(a_mx.expected_inflation)} a 1–4 años) contra la de EE.UU. ({_p(a_us.expected_inflation)}): exige {_p(a_mx.cost_of_equity())}.",
+        f"El crecimiento terminal es el crecimiento real de largo plazo del consenso (Fed en EE.UU., encuesta de Banxico a 10 años "
+        f"en México) más la inflación esperada de largo plazo, con tope en la tasa a 10 años local: {_p(a_us.terminal_growth)} en "
+        f"EE.UU. ({_p(a_us.real_growth_long_run)} real; nuestra tendencia sin 2020-2021 da {_p(a_us.real_growth_ours)}) y "
+        f"{_p(a_mx.terminal_growth)} en México ({_p(a_mx.real_growth_long_run)} real; la nuestra da {_p(a_mx.real_growth_ours)}). "
+        "Si una empresa necesita crecer más que eso para valer su precio, la valuación es exigente.",
     ]
     return out
 
@@ -210,12 +235,15 @@ def _country_reasons(s: CountrySnapshot, cmp, fc: dict, name: str) -> list[str]:
     out.append(f"Contra el FMI: crecimiento {'arriba' if gap_g >= 0 else 'abajo'} por {_p(abs(gap_g))} e inflación "
                f"{'arriba' if gap_i >= 0 else 'abajo'} por {_p(abs(gap_i))} de lo que espera para {cmp.year}.")
     f = fc[f"Inflación {name}"]
-    view = (f"Pronóstico de inflación a {f['horizon']}: {f['ensemble']:.2f}% (promedio de modelos; reversión a la "
-            f"media {f['ar1']:.2f}%, tendencia {f['drift']:.2f}%)")
-    if f["imf"] is not None:
-        view += f"; el FMI espera {f['imf']:.2f}% en promedio el próximo año"
+    outside = "la Fed de Cleveland" if name == "EE.UU." else "la encuesta de Banxico"
+    view = f"Pronóstico de inflación a {f['horizon']}: {f['ensemble']:.2f}%"
     if f["market"] is not None:
-        view += f"; el mercado descuenta {f['market']:.2f}% anual a 10 años"
+        view += (f", promedio de nuestra reversión a la media ({f['ar1']:.2f}%) y de lo que espera {outside} a 12 meses "
+                 f"({f['market']:.2f}%); nuestra tendencia pura da {f['drift']:.2f}%")
+    else:
+        view += f" (promedio de modelos; reversión a la media {f['ar1']:.2f}%, tendencia {f['drift']:.2f}%)"
+    if f["imf"] is not None:
+        view += f". El FMI espera {f['imf']:.2f}% en promedio el próximo año"
     out.append(view + ".")
     return out
 
@@ -244,7 +272,7 @@ def _kpis(r: MacroReport, m: Markets, n: dict[str, Neutral]) -> dict[str, list[d
 
     w, e = r.world, r.mx_extras
     mx = country(r.mx, r.vs_imf[1]) + [
-        k("Peso por dólar", f"{e.fx_usd:.2f}", f"{_p(e.fx_yoy)} anual · real vs 10a {_p(e.real_fx_gap)}"),
+        k("Peso por dólar", f"{e.fx_usd:.2f}", f"{_p(e.fx_yoy)} anual · real (BIS) vs 10a {_p(e.real_fx_gap)}"),
         k("Carry vs EE.UU.", _p(e.carry_vs_us), f"real {_p(e.real_carry_vs_us)}",
           "good" if e.real_carry_vs_us >= 0.01 else "bad")]
     return {
@@ -265,7 +293,19 @@ def _kpis(r: MacroReport, m: Markets, n: dict[str, Neutral]) -> dict[str, list[d
     }
 
 
-def _chart(title, unit, hist, fc, imf, extra, anchor_label=None) -> dict:
+def _at_horizon(value: float, start: pd.Timestamp, months: int) -> pd.Series:
+    """A single outside number reached *months* after the last print."""
+    return pd.Series([value], index=[start + pd.DateOffset(months=months)])
+
+
+def _along(points: pd.Series, now: float, now_date: pd.Timestamp, index: pd.DatetimeIndex) -> pd.Series:
+    """An outside path on the forecast dates: linear in time from today's value through its points, flat after the last."""
+    p = pd.concat([pd.Series([now], index=[now_date]), points[points.index > now_date]]).sort_index()
+    x = lambda ix: (pd.DatetimeIndex(ix) - now_date).days.to_numpy(float)
+    return pd.Series(np.interp(x(index), x(p.index), p.to_numpy(float)), index=index)
+
+
+def _chart(title, unit, hist, fc, imf, extra, anchor_label=None, outside_label=None) -> dict:
     """Lines carry a role, not a color: the page maps roles to its palette so every chart reads the same way."""
     lines = [{"label": "Histórico", "role": "hist", "points": _pts(hist)}]
     for i, (label, ser) in enumerate(extra):
@@ -280,6 +320,8 @@ def _chart(title, unit, hist, fc, imf, extra, anchor_label=None) -> dict:
     ]
     if "anchor" in fc:
         lines.append({"label": anchor_label, "role": "anchor", "points": start + _pts(fc["anchor"])})
+    if "outside" in fc:
+        lines.append({"label": outside_label, "role": "outside", "points": start + _pts(fc["outside"])})
     if imf is not None and not imf.empty:
         lines.append({"label": "FMI (promedio anual)", "role": "imf", "points": _pts(imf), "scatter": True})
     return {"title": title, "unit": unit, "lines": lines}
@@ -650,6 +692,7 @@ const ROLE = {
   ens:    {color: C.ink, width: 2, dash: [9, 4]},
   imf:    {color: C.s5, width: 0, dash: []},
   anchor: {color: C.s6, width: 2, dash: [3, 3]},
+  outside: {color: C.s5, width: 2, dash: [8, 3, 2, 3]},
 };
 const REG = {goldilocks: 'goldilocks', reflation: 'reflación', stagflation: 'estanflación', slowdown: 'desaceleración'};
 const REG_TONE = {goldilocks: 'good', reflation: 'warn', stagflation: 'bad', slowdown: 'warn'};
@@ -701,7 +744,7 @@ const swatch = (role, scatter) => scatter
   : role === 'band' ? `<svg width="18" height="10" aria-hidden="true"><rect width="18" height="10" rx="3" fill="${ROLE.band.color}" opacity=".28"/></svg>`
   : `<svg width="22" height="6" aria-hidden="true"><line x1="1" y1="3" x2="21" y2="3" stroke="${ROLE[role].color}" stroke-width="2" stroke-linecap="round" stroke-dasharray="${ROLE[role].dash.join(' ')}"/></svg>`;
 document.getElementById('legend').innerHTML = '<b>Cómo leer las gráficas</b>' + [['hist', 'Histórico'], ['band', 'Banda 90%'], ['ar', 'Reversión a la media'],
-  ['drift', 'Tendencia amortiguada'], ['ens', 'Promedio de modelos'], ['anchor', 'Ancla (tasa neutral o costo de capital)'], ['imf', 'FMI', true]].map(([r, l, sc]) => `<span>${swatch(r, sc)}${l}</span>`).join('');
+  ['drift', 'Tendencia amortiguada'], ['ens', 'Promedio de modelos'], ['anchor', 'Ancla propia (regla de Taylor o costo de capital)'], ['outside', 'Mercado o consenso (futuros, expectativas, encuesta)'], ['imf', 'FMI', true]].map(([r, l, sc]) => `<span>${swatch(r, sc)}${l}</span>`).join('');
 
 // Sections
 const SECTIONS = [
@@ -803,13 +846,13 @@ const half = f => Math.max(Math.abs(f.lo - f.now), Math.abs(f.hi - f.now), Math.
 const at = (v, f) => (50 + (v - f.now) / half(f) * 50).toFixed(1) + '%';
 html += `<section id="pronosticos" class="tab" hidden><div class="sec-head"><h2 class="sec">Pronósticos a 12 meses</h2><span class="sub">Dos modelos, su promedio y las referencias del FMI y del mercado</span></div>
   <div class="card table-wrap"><table><thead><tr><th>Indicador</th><th>Horizonte</th><th>Actual</th><th>Tendencia</th><th>Reversión</th><th>Promedio</th>
-  <th>Rango 90%</th><th aria-label="Rango visual"></th><th>FMI</th><th>Mercado</th><th>Ancla</th></tr></thead><tbody>` + D.forecasts.map(f => `<tr>
+  <th>Rango 90%</th><th aria-label="Rango visual"></th><th>FMI</th><th>Mercado / consenso</th><th>Ancla propia</th></tr></thead><tbody>` + D.forecasts.map(f => `<tr>
   <td>${esc(f.name)}</td><td>${f.horizon}</td><td>${num(f.now, f.unit)}</td><td>${num(f.drift, f.unit)}</td><td>${num(f.ar1, f.unit)}</td>
   <td class="strong">${num(f.ensemble, f.unit)}</td><td>${num(f.lo, f.unit)} – ${num(f.hi, f.unit)}</td>
   <td><div class="range" title="Centrado en hoy (línea blanca): rango 90% y promedio (punto)"><div class="bar" style="left:${at(f.lo, f)};width:calc(${at(f.hi, f)} - ${at(f.lo, f)})"></div>
   <div class="mk now" style="left:${at(f.now, f)}"></div><div class="mk ens" style="left:${at(f.ensemble, f)}"></div></div></td>
   <td>${num(f.imf, f.unit)}</td><td>${num(f.market, f.unit)}</td><td>${num(f.anchor, f.unit)}</td></tr>`).join('') + `</tbody></table></div>
-  <p class="method"><b>Tendencia</b>: el ritmo del último año, amortiguado para no proyectar un choque para siempre. <b>Reversión</b>: modelo autorregresivo ajustado a 10 años; la serie regresa a su promedio de largo plazo. <b>Promedio</b>: de ambos modelos. <b>Rango 90%</b>: cubre ambos modelos más el error típico del modelo, sin que un choque como 2020 lo infle. En la barra, la línea blanca es hoy y el punto verde el promedio. <b>FMI</b>: último año proyectado. <b>Mercado</b>: inflación esperada a 10 años en la inflación de EE.UU.; en las tasas de política, el bono a 2 años (EE.UU.) o los CETES a un año (México), que reflejan la tasa que el mercado espera. <b>Ancla</b>: lo que implica la macro. En las tasas de política, la convergencia a nuestra tasa neutral nominal (la brecha se reduce a la mitad cada año); en los índices, el nivel al que llegarían si rinden exactamente nuestro costo de capital (EE.UU. para los índices en dólares y extranjeros, México para el IPC). Son referencias, no certezas.</p></section>`;
+  <p class="method"><b>Tendencia</b> y <b>Reversión</b> son nuestros dos modelos puros: el ritmo del último año, amortiguado, y un autorregresivo ajustado a 10 años que regresa la serie a su promedio de largo plazo. <b>Promedio</b>: el pronóstico que usamos. Donde hay una vista de mercado o de consenso, es el promedio de la reversión y esa vista; si no la hay, el promedio de los dos modelos. La tendencia queda fuera cuando hay mercado porque el precio de mercado ya incorpora el impulso reciente. <b>Rango 90%</b>: cubre los modelos y la vista externa más el error típico del modelo, sin que un choque como 2020 lo infle. En la barra, la línea blanca es hoy y el punto verde el promedio. <b>FMI</b>: último año proyectado. <b>Mercado / consenso</b>: inflación esperada a 1 año de la Fed de Cleveland (EE.UU.) y mediana de la encuesta de Banxico a 12 meses (México); futuros de Fed funds; Cete 28 esperado al cierre de año por la encuesta de Banxico (no el forward de la curva, que trae prima por plazo); curva de futuros de Brent y cobre. <b>Ancla propia</b>: en las tasas de política, la convergencia a una regla de Taylor (neutral nominal + la mitad de la brecha de inflación + la mitad de la brecha de producto leída del desempleo), cuya distancia se reduce a la mitad cada año; en los índices, el nivel al que llegarían si rinden exactamente nuestro costo de capital. Son referencias, no certezas.</p></section>`;
 html += `<section id="valuacion" class="tab" hidden><div class="sec-head"><h2 class="sec">Supuestos de valuación</h2><span class="sub">Lo que estas lecturas implican para descontar flujos</span></div>
   <div class="split"><div class="why"><h3>Por qué estos supuestos</h3><ol>${D.reasons['Supuestos'].concat(D.reasons['Riesgo']).map(r => `<li>${emph(r)}</li>`).join('')}</ol></div>
   <div class="card table-wrap"><table><thead><tr><th>Mercado</th><th>Libre de riesgo</th><th>Prima</th><th>Riesgo país</th><th>Infl. esperada</th>
