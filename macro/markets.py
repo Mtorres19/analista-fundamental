@@ -73,10 +73,47 @@ def fit_nss(years: list[float], yields: list[float]) -> NSS:
     return NSS(betas=[float(x) for x in b], tau1=float(tau1), tau2=None if tau2 is None else float(tau2))
 
 
+def ytm(dirty, coupon, days):
+    """Yield to maturity, % a year, of Mexican fixed-coupon bonds (Bonos M, Udibonos): 182-day coupon periods,
+    coupon per period = coupon% * 182/360 per 100, discounting at (1 + y * 182/360) per period, the first one
+    fractional (days to next coupon / 182). Works elementwise on arrays (one bond per date); NaN in, NaN out."""
+    p, c, d = (np.asarray(x, float) for x in (dirty, coupon, days))
+    n = np.ceil(d / 182)
+    first = np.where(d % 182 == 0, 182, d % 182) / 182
+    cpn = c * 182 / 360
+    k = np.arange(int(np.nanmax(n)) if np.isfinite(n).any() else 0)[:, None]   # coupon index, rows
+    def price(y):
+        disc = (1 + y * 182 / 36000) ** -(first + k)
+        flows = np.where(k < n, cpn, 0) + np.where(k == n - 1, 100, 0)
+        return (flows * disc).sum(axis=0)
+    lo, hi = np.full(p.shape, -5.0), np.full(p.shape, 40.0)
+    for _ in range(70):                    # bisection: price falls as the yield rises
+        mid = (lo + hi) / 2
+        cheap = price(mid) < p
+        hi, lo = np.where(cheap, mid, hi), np.where(cheap, lo, mid)
+    out = (lo + hi) / 2
+    return np.where(np.isfinite(p) & np.isfinite(c) & np.isfinite(d) & (d > 0), out, np.nan)
+
+
+def vector_nodes(v: dict[str, pd.Series], prefix: str, real: bool) -> dict[str, tuple[pd.Series, pd.Series]]:
+    """Daily yield and years to maturity for each price-vector bucket (M3..M30 or U3..U30), keyed '3y', '10y'..."""
+    out = {}
+    for name in sorted({k.split("_")[0] for k in v if k.startswith(prefix)}, key=lambda b: int(b[1:])):
+        df = pd.concat({f: v[f"{name}_{f}"] for f in ("plazo", "sucio", "cupon")}, axis=1).dropna()
+        if real:  # Udibonos are priced in pesos: per 100 UDIs with that day's UDI value
+            df["sucio"] = df["sucio"] / v["udi"].reindex(df.index, method="ffill")
+            df = df.dropna()
+        df = df[df.index > df.index[-1] - pd.DateOffset(years=6)] if len(df) else df
+        out[f"{name[1:]}y"] = (pd.Series(ytm(df["sucio"], df["cupon"], df["plazo"]), index=df.index).dropna(),
+                               df["plazo"] / 365)
+    return out
+
+
 class Curve(BaseModel):
     country: str
     tenors: list[str]
     years: list[float]
+    years_by: dict[str, list[float]] = {}   # per date when maturities move (price-vector buckets roll down)
     now: list[float | None]
     m3: list[float | None]      # three months before as_of
     y1: list[float | None]      # a year before as_of
@@ -108,7 +145,9 @@ class Markets(BaseModel):
     mx_curve: Curve
     us_real: dict[str, float]
     us_real_curve: Curve
-    mx_real_curve: Curve          # Udibonos
+    mx_real_curve: Curve          # Udibonos, from the price vector
+    mx_10y_daily: list[list]      # Bono M 7-10y bucket yield, daily, [ms, %]
+    us10_daily: list[list]
     us_2s10s: float
     us_3m10y: float
     mx_28d10y: float
@@ -151,7 +190,19 @@ def build_markets(r: MacroReport, fetch: sources.Fetch = sources.fetch) -> Marke
     ipc = idx["IPC México"]
     ipc_usd = _index("IPC México en dólares", (ipc / fx.reindex(ipc.index, method="ffill")).dropna(), "USD", coe_us)
 
-    us_curve, mx_curve = _curve("US", us_c, as_of), _curve("MX", mx_c, as_of)
+    v = sources.load("MX_VECTOR", as_of, fetch)
+    auction = sources.load("MX_AUCTION", as_of, fetch)
+    nominal, realv = vector_nodes(v, "M", real=False), vector_nodes(v, "U", real=True)
+    # A bucket with no price in 60 days (Bonos 5-7 often reads N/E) falls back to that tenor's auction yield.
+    stale = lambda ser: ser.empty or ser.index[-1] < pd.Timestamp(as_of) - pd.Timedelta(days=60)
+    for nodes, pre in ((nominal, ""), (realv, "udi_")):
+        for t, (y, yrs) in list(nodes.items()):
+            if stale(y) and pre + t in auction:
+                nodes[t] = (auction[pre + t], pd.Series(tenor_years(t), index=auction[pre + t].index))
+    mx_series = {**{k: x for k, x in mx_c.items() if k != "2y"}, "2y": mx_c["2y"], **{t: y for t, (y, _) in nominal.items()}}
+    mx_years = {"2y": v["cetes2y_plazo"] / 365, **{t: yrs for t, (_, yrs) in nominal.items()}}
+    us_curve, mx_curve = _curve("US", us_c, as_of), _curve("MX", mx_series, as_of, mx_years)
+    self_real = _curve("MX", {t: y for t, (y, _) in realv.items()}, as_of, {t: yrs for t, (_, yrs) in realv.items()})
     for c, tenors in ((us_curve, ("2y", "10y")), (mx_curve, ("28d", "364d", "10y"))):
         for t in tenors:
             if c.at(t) is None:
@@ -169,7 +220,8 @@ def build_markets(r: MacroReport, fetch: sources.Fetch = sources.fetch) -> Marke
     return Markets(
         as_of=as_of, indices=stats, ipc_usd=ipc_usd, us_curve=us_curve, mx_curve=mx_curve, us_real=real,
         us_real_curve=_curve("US", sources.load("US_REAL", as_of, fetch), as_of),
-        mx_real_curve=_curve("MX", sources.load("MX_REAL", as_of, fetch), as_of),
+        mx_real_curve=self_real, mx_10y_daily=_pts(mx_series["10y"][mx_series["10y"].index > pd.Timestamp(as_of) - pd.DateOffset(years=5)]),
+        us10_daily=_pts(us_c["10y"].dropna()[us_c["10y"].dropna().index > pd.Timestamp(as_of) - pd.DateOffset(years=5)]),
         us_2s10s=float(s2s10.dropna().iloc[-1]), us_3m10y=float(s3m10y.dropna().iloc[-1]),
         mx_28d10y=mx_curve.at("10y") - mx_curve.at("28d"),
         recession_prob=recession_probability(float(s3m10y.dropna().iloc[-1])),
@@ -248,18 +300,23 @@ def _index(name: str, s: pd.Series, currency: str, coe: float) -> IndexStats:
     )
 
 
-def _curve(country: str, s: dict[str, pd.Series], as_of: str) -> Curve:
+def _curve(country: str, s: dict[str, pd.Series], as_of: str, maturity: dict[str, pd.Series] | None = None) -> Curve:
+    """maturity: years to maturity by date for nodes whose maturity moves; other nodes sit at their nominal tenor."""
     t = pd.Timestamp(as_of)
+    maturity = maturity or {}
     # A tenor auctioned only now and then counts as "now" if printed in the last 60 days.
     at = lambda ser, when: (None if ser[ser.index <= when].empty or ser[ser.index <= when].index[-1] < when - pd.Timedelta(days=60)
                             else round(float(ser[ser.index <= when].iloc[-1]), 3))
     tenors = list(s)
-    years = [tenor_years(k) for k in tenors]
     dates = {"now": t, "m3": t - pd.DateOffset(months=3), "y1": t - pd.DateOffset(years=1)}
-    vals = {k: [at(s[x], d) for x in tenors] for k, d in dates.items()}
-    fit = lambda v: (fit_nss([y for y, x in zip(years, v) if x is not None], [x for x in v if x is not None])
-                     if sum(x is not None for x in v) >= 4 else None)
-    return Curve(country=country, tenors=tenors, years=years, **vals, fits={k: fit(v) for k, v in vals.items()})
+    yrs = lambda k, d: round(float(maturity[k][maturity[k].index <= d].iloc[-1]), 4) \
+        if k in maturity and not maturity[k][maturity[k].index <= d].empty else tenor_years(k)
+    years_by = {key: [yrs(k, d) for k in tenors] for key, d in dates.items()}
+    vals = {key: [at(s[x], d) for x in tenors] for key, d in dates.items()}
+    fit = lambda key: (fit_nss([y for y, x in zip(years_by[key], vals[key]) if x is not None], [x for x in vals[key] if x is not None])
+                       if sum(x is not None for x in vals[key]) >= 4 else None)
+    return Curve(country=country, tenors=tenors, years=years_by["now"], years_by=years_by, **vals,
+                 fits={key: fit(key) for key in dates})
 
 
 def _pts(series: pd.Series) -> list[list]:

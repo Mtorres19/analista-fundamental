@@ -18,6 +18,16 @@ CURVES = {"DGS1MO": 5.0, "DGS3MO": 5.0, "DGS6MO": 4.9, "DGS1": 4.8, "DGS2": 4.5,
           "SF45470": 8.0, "SF45471": 8.1, "SF45472": 8.2, "SF45473": 8.3, "SF43883": 8.6, "SF43886": 8.8,
           "SF44071": 9.0, "SF45384": 9.3, "SF60696": 9.5,
           "SF61592": 4.0, "SF43924": 4.2, "SF46958": 4.4, "SF46961": 4.5}
+# Price vector: every bucket priced at par (dirty 100, Udibonos 100 UDIs at UDI = 8) with whole coupon periods,
+# so each yield equals its coupon: Bonos 8.6..9.5, Udibonos 4.0..4.5.
+VECTOR = {"SF349889": 8.4, "SF349886": 728, "SP68257": 8.0}
+for ids, cpn, periods in ((("SF45427", "SF45449", "SF45475"), 8.6, 6), (("SF45428", "SF45451", "SF45476"), 8.8, 10),
+                          (("SF45429", "SF45453", "SF45477"), 8.9, 14), (("SF45430", "SF45455", "SF45478"), 9.0, 20),
+                          (("SF45431", "SF45457", "SF45479"), 9.3, 40), (("SF60720", "SF60722", "SF60723"), 9.5, 56),
+                          (("SF61784", "SF61786", "SF61787"), 4.0, 6), (("SF45432", "SF45459", "SF45480"), 4.2, 20),
+                          (("SF50761", "SF50766", "SF50763"), 4.4, 40), (("SF50762", "SF50768", "SF50764"), 4.5, 60)):
+    VECTOR.update({ids[0]: 182 * periods, ids[1]: 800.0 if cpn < 5 else 100.0, ids[2]: cpn})
+
 # Activity, external and risk series: flat levels (zero growth) are enough for the cross-feeds under test.
 ECON = {"BOPGSTB": -60000, "IEABC": -250000, "INDPRO": 100, "RSAFS": 700000, "PAYEMS": 150000, "UMCSENT": 60,
         "EXPINF1YR": 2.5, "SE44352": -2000, "SE44355": 150000, "SE44374": 140000, "SE27803": 5000, "SF43707": 230000,
@@ -31,6 +41,8 @@ def fake_fetch(source: str, sid: str) -> pd.Series:
         return pd.Series(LEVELS[sid], index=idx)
     if sid in CURVES:
         return pd.Series(CURVES[sid], index=idx)
+    if sid in VECTOR:
+        return pd.Series(float(VECTOR[sid]), index=idx)
     if sid in ECON:
         return pd.Series(float(ECON[sid]), index=idx)
     if source == "yahoo":  # indices grow 8% a year; the IPC falls 20% from June 2026
@@ -248,3 +260,20 @@ def test_nss_fit_recovers_known_curve():
     assert ns.tau2 is None and len(ns.betas) == 3
     with pytest.raises(sources.DataError):
         fit_nss([1, 2, 3], [4, 4, 4])
+
+
+def test_ytm_mexican_convention():
+    import numpy as np
+    from macro.markets import ytm
+    # Coupon = yield and whole coupon periods -> par; a cheaper price means a higher yield.
+    assert ytm([100.0], [8.0], [182 * 20])[0] == pytest.approx(8.0, abs=1e-6)
+    assert ytm([95.0], [8.0], [182 * 20])[0] > 8.0
+    assert np.isnan(ytm([np.nan], [8.0], [3640])[0])
+
+
+def test_mexico_curve_from_price_vector(report):
+    from macro.markets import build_markets
+    m = build_markets(report, fake_fetch)
+    assert m.mx_curve.at("10y") == pytest.approx(9.0, abs=1e-4)          # par bond yields its coupon
+    assert m.mx_real_curve.at("10y") == pytest.approx(4.2, abs=1e-4)     # Udibono price / UDI value
+    assert m.mx_curve.years_by["now"][m.mx_curve.tenors.index("30y")] == pytest.approx(182 * 56 / 365, abs=1e-3)

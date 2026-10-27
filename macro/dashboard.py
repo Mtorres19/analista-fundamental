@@ -353,12 +353,16 @@ def _specs(m: Markets, n: dict[str, Neutral], e: Economy) -> dict[str, dict]:
     """Charts that are not one forecast series: curves by tenor, bars by category, several series over time."""
     grid = np.geomspace(1 / 365, 30, 80)
     def fitted(curve, key, label, color, dash=()):
-        f = curve.fits[key]
-        return [] if f is None else [{"label": label, "color": color, "dash": list(dash),
-                                      "points": [[round(float(t), 4), round(float(v), 3)] for t, v in zip(grid, f(grid))
-                                                 if min(curve.years) <= t <= max(curve.years)]}]  # no extrapolation
-    def nodes(curve, key, label, color):
-        obs = [(k, y, v) for k, y, v in zip(curve.tenors, curve.years, getattr(curve, key)) if v is not None]
+        f, yrs = curve.fits[key], curve.years_by.get(key, curve.years)
+        if f is None:
+            return []
+        ts = np.array(sorted({min(yrs), max(yrs), *(t for t in grid if min(yrs) < t < max(yrs))}))  # no extrapolation
+        return [{"label": label, "color": color, "dash": list(dash),
+                 "points": [[round(float(t), 4), round(float(v), 3)] for t, v in zip(ts, f(ts))]}]
+    def nodes(curve, key, label, color, real=False):
+        yrs = curve.years_by.get(key, curve.years)
+        name = lambda k, y: (NODE_NAMES.get(("U" if real else "") + k, k) if curve.country == "MX" else k) + f" · {y:.1f} años"
+        obs = [(name(k, y), y, v) for k, y, v in zip(curve.tenors, yrs, getattr(curve, key)) if v is not None]
         return {"label": label, "color": color, "dots": True, "tenors": [k for k, _, _ in obs], "points": [[y, v] for _, y, v in obs]}
     curve = lambda c: {"kind": "tenor", "unit": "%", "series": fitted(c, "now", "Hoy (curva ajustada)", "s1")
                        + fitted(c, "m3", "Hace 3 meses", "s3", [5, 4]) + fitted(c, "y1", "Hace un año", "muted", [2, 3])
@@ -369,7 +373,10 @@ def _specs(m: Markets, n: dict[str, Neutral], e: Economy) -> dict[str, dict]:
         "curve_US": curve(m.us_curve), "curve_MX": curve(m.mx_curve),
         "real_curves": {"kind": "tenor", "unit": "%", "series": fitted(m.us_real_curve, "now", "EE.UU. (TIPS)", "s1")
                         + fitted(m.mx_real_curve, "now", "México (Udibonos)", "s2")
-                        + [nodes(m.us_real_curve, "now", "Nodos EE.UU.", "s1"), nodes(m.mx_real_curve, "now", "Nodos México", "s2")]},
+                        + [nodes(m.us_real_curve, "now", "Nodos EE.UU.", "s1"), nodes(m.mx_real_curve, "now", "Nodos México", "s2", real=True)]},
+        "mx10_daily": {"kind": "time", "daily": True, "unit": "%", "series": [
+            {"label": "Bono M 7–10 años (vector de precios)", "color": "s2", "points": m.mx_10y_daily},
+            {"label": "Treasury 10 años", "color": "s1", "points": m.us10_daily}]},
         "spread": {"kind": "cat", "unit": " pp", "labels": [k.replace("y", "a") for k in m.mx_us_spread],
                    "series": [{"label": "México menos EE.UU.", "color": "s2", "values": list(m.mx_us_spread.values())}]},
         "slopes": {"kind": "time", "daily": True, "unit": " pp", "ref": 0, "series": [{"label": "10a – 2a", "color": "s1", "points": m.slopes["2s10s"]},
@@ -389,6 +396,13 @@ def _specs(m: Markets, n: dict[str, Neutral], e: Economy) -> dict[str, dict]:
             {"label": "r* nuestro", "color": "s3", "dash": [5, 4], "points": [[t, round(x.rstar, 3)] for t in span]},
             {"label": x.external_label, "color": "s4", "dash": [2, 3], "points": [[t, round(x.external, 3)] for t in span]}]}
     return spec
+
+
+# What each Mexican node is: price-vector bucket or money-market rate (U = Udibonos, real).
+NODE_NAMES = {"1d": "TIIE de fondeo", "28d": "Cetes 28d", "91d": "Cetes 91d", "182d": "Cetes 182d", "364d": "Cetes 364d",
+              "2y": "Cetes 2 años", "3y": "Bono M 0–3a", "5y": "Bono M 3–5a", "7y": "Bono M 5–7a", "10y": "Bono M 7–10a",
+              "20y": "Bono M 10–20a", "30y": "Bono M 20–30a", "U3y": "Udibono 3a", "U10y": "Udibono 10a",
+              "U20y": "Udibono 20a", "U30y": "Udibono 30a"}
 
 
 def _ym(ms: int, fmt: str) -> str:
@@ -746,9 +760,10 @@ const sec = (id, title, sub, body) => `<section id="${id}" class="tab" hidden><d
 const NR = D.neutral;
 html += sec('curvas', 'Curvas y tasas', 'Curvas nominales y reales, pendiente, recesión y tasa neutral',
   tiles(MK.kpis) +
-  `<div class="charts" style="margin-top:14px">${card('curve_US', 'Curva de Treasuries', 'Rendimiento por plazo, %.')}${card('curve_MX', 'Curva de México', 'CETES y Bonos M en subasta, %.')}</div>
+  `<div class="charts" style="margin-top:14px">${card('curve_US', 'Curva de Treasuries', 'Rendimiento por plazo, %.')}${card('curve_MX', 'Curva de México', 'Vector de precios Banxico (mercado secundario): TIIE de fondeo, Cetes y Bonos M; rendimiento al vencimiento calculado del precio, %.')}</div>
   <div class="split">${why('Qué dicen las curvas', D.reasons['Curvas'])}<div class="charts">
-  ${card('real_curves', 'Curvas reales', 'TIPS de EE.UU. y Udibonos de México, % real por plazo.')}
+  ${card('real_curves', 'Curvas reales', 'TIPS de EE.UU. y Udibonos de México (vector de precios Banxico), % real por plazo.')}
+  ${card('mx10_daily', 'Bono M a 10 años vs Treasury, diario', 'Rendimiento de mercado del tramo 7–10 años del vector de precios y del Treasury a 10 años.')}
   ${card('spread', 'Diferencial México – EE.UU.', 'Puntos porcentuales por plazo.')}
   ${card('slopes', 'Pendiente de la curva de EE.UU.', 'Abajo de cero, curva invertida.')}
   ${card('prob', 'Probabilidad de recesión a 12 meses', 'Probit de la Fed de Nueva York sobre la pendiente 10a – 3m. La línea punteada marca 30%.')}

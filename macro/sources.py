@@ -59,19 +59,29 @@ SERIES: dict[str, dict[str, tuple[str, str, int]]] = {
         ("5y", "DGS5"), ("7y", "DGS7"), ("10y", "DGS10"), ("20y", "DGS20"), ("30y", "DGS30"))},
     "US_REAL": {t: ("fred", sid, 1) for t, sid in (
         ("5y", "DFII5"), ("7y", "DFII7"), ("10y", "DFII10"), ("20y", "DFII20"), ("30y", "DFII30"))},
-    # Short end daily: TIIE de fondeo (overnight) and CETES from Banxico's daily price vector (secondary market).
-    # Bonos M: weekly auction yields, the only free source; a tenor is auctioned every few weeks.
+    # Short end, daily market yields: TIIE de fondeo (overnight) and CETES from Banxico's price vector (CF300).
     "MX_CURVE": {t: ("banxico", sid, 1) for t, sid in (
         ("1d", "SF331451"), ("28d", "SF45470"), ("91d", "SF45471"), ("182d", "SF45472"), ("364d", "SF45473"),
-        ("3y", "SF43883"), ("5y", "SF43886"), ("10y", "SF44071"), ("20y", "SF45384"), ("30y", "SF60696"))},
+        ("2y", "SF349889"))},
+    # Banxico price vector (CF300, daily market valuation) for each Bonos M / Udibonos benchmark bucket:
+    # days to maturity, dirty price (Udibonos in pesos per 100 UDIs) and coupon; markets.py turns them into yields.
+    "MX_VECTOR": {f"{b}_{f}": ("banxico", sid, 1) for b, ids in (
+        ("M3", ("SF45427", "SF45449", "SF45475")), ("M5", ("SF45428", "SF45451", "SF45476")),
+        ("M7", ("SF45429", "SF45453", "SF45477")), ("M10", ("SF45430", "SF45455", "SF45478")),
+        ("M20", ("SF45431", "SF45457", "SF45479")), ("M30", ("SF60720", "SF60722", "SF60723")),
+        ("U3", ("SF61784", "SF61786", "SF61787")), ("U10", ("SF45432", "SF45459", "SF45480")),
+        ("U20", ("SF50761", "SF50766", "SF50763")), ("U30", ("SF50762", "SF50768", "SF50764")))
+        for f, sid in zip(("plazo", "sucio", "cupon"), ids)} | {
+        "cetes2y_plazo": ("banxico", "SF349886", 1), "udi": ("banxico", "SP68257", 1)},
+    # Weekly auction yields: fallback for a vector bucket with no recent price, and a sanity check.
+    "MX_AUCTION": {t: ("banxico", sid, 1) for t, sid in (
+        ("3y", "SF43883"), ("5y", "SF43886"), ("10y", "SF44071"), ("20y", "SF45384"), ("30y", "SF60696"),
+        ("udi_3y", "SF61592"), ("udi_10y", "SF43924"), ("udi_20y", "SF46958"), ("udi_30y", "SF46961"))},
     # name -> Yahoo Finance ticker, daily closes in local currency.
     "INDICES": {n: ("yahoo", t, 1) for n, t in (
         ("S&P 500", "^GSPC"), ("Nasdaq", "^IXIC"), ("Dow Jones", "^DJI"), ("Russell 2000", "^RUT"),
         ("IPC México", "^MXX"), ("Euro Stoxx 50", "^STOXX50E"), ("Nikkei 225", "^N225"), ("FTSE 100", "^FTSE"),
         ("Emergentes (EEM)", "EEM"))},
-    # Udibonos: real yields at auction, %.
-    "MX_REAL": {t: ("banxico", sid, 1) for t, sid in (
-        ("3y", "SF61592"), ("10y", "SF43924"), ("20y", "SF46958"), ("30y", "SF46961"))},
     "US_ECON": {
         "trade_balance": ("fred", "BOPGSTB", 40),       # goods & services, USD mn, monthly
         "current_account": ("fred", "IEABC", 90),       # USD mn, quarterly
@@ -165,11 +175,13 @@ def parse_hlw(xlsx: bytes) -> pd.Series:
     return pd.Series(body.iloc[:, 1].astype(float).values, index=pd.to_datetime(body.iloc[:, 0]))
 
 
-def parse_banxico(payload: dict) -> pd.Series:
+def parse_banxico(payload: dict, series_id: str | None = None) -> pd.Series:
+    """One series from a SIE answer: the first, or the one named series_id when the call asked for several."""
     try:
-        datos = payload["bmx"]["series"][0]["datos"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise DataError("Banxico: unexpected payload") from exc
+        series = payload["bmx"]["series"]
+        datos = next(x for x in series if series_id in (None, x["idSerie"])).get("datos", [])
+    except (KeyError, IndexError, TypeError, StopIteration) as exc:
+        raise DataError(f"Banxico {series_id or ''}: unexpected payload") from exc
     # Dates are dd/mm/yyyy, numbers carry thousands commas, "N/E" means no data.
     idx = pd.to_datetime([d["fecha"] for d in datos], format="%d/%m/%Y")
     vals = pd.to_numeric(pd.Series([d["dato"].replace(",", "") for d in datos], index=idx), errors="coerce")
@@ -183,12 +195,24 @@ def _fred(series_id: str) -> pd.Series:
     return pd.to_numeric(df.iloc[:, 0], errors="coerce").dropna()
 
 
+_banxico_cache: dict[str, dict] = {}
+
+
 def _banxico(series_id: str) -> pd.Series:
+    """SIE caps queries per token, so the first call fetches every declared Banxico series, 20 per request."""
     token = os.environ.get("BANXICO_TOKEN")
     if not token:
         raise DataError("BANXICO_TOKEN is not set (free at https://www.banxico.org.mx/SieAPIRest/service/v1/token)")
-    resp = _get(BANXICO_API.format(id=series_id), headers={"Bmx-Token": token})
-    return parse_banxico(resp.json())
+    if series_id not in _banxico_cache:
+        wanted = [series_id] + sorted({sid for reg in SERIES.values() for src, sid, _ in reg.values()
+                                       if src == "banxico" and sid != series_id and sid not in _banxico_cache})
+        for i in range(0, len(wanted), 20):
+            resp = _get(BANXICO_API.format(id=",".join(wanted[i:i + 20])), headers={"Bmx-Token": token})
+            for x in resp.json().get("bmx", {}).get("series", []):
+                _banxico_cache[x["idSerie"]] = {"bmx": {"series": [x]}}
+    if series_id not in _banxico_cache:
+        raise DataError(f"Banxico {series_id}: not in the SIE answer")
+    return parse_banxico(_banxico_cache[series_id])
 
 
 def _yahoo(ticker: str) -> pd.Series:
@@ -212,8 +236,9 @@ def _yahoo(ticker: str) -> pd.Series:
 
 def _get(url: str, **kwargs) -> requests.Response:
     try:
-        resp = requests.get(url, timeout=30, **kwargs)
+        resp = requests.get(url, timeout=60, **kwargs)
         resp.raise_for_status()
     except requests.RequestException as exc:
-        raise DataError(f"{url}: {exc}") from exc
+        detail = getattr(exc.response, "text", "")[:200] if getattr(exc, "response", None) is not None else ""
+        raise DataError(f"{url}: {exc} {detail}".strip()) from exc
     return resp
