@@ -15,7 +15,12 @@ GROWING = {"CPIAUCSL": 0.03, "SP1": 0.04, "GDPC1": 0.02, "NGDPRSAXDCMXQ": 0.01,
 CURVES = {"DGS1MO": 5.0, "DGS3MO": 5.0, "DGS6MO": 4.9, "DGS1": 4.8, "DGS2": 4.5, "DGS3": 4.4, "DGS5": 4.3,
           "DGS7": 4.25, "DGS20": 4.4, "DGS30": 4.5, "DFII5": 2.1, "DFII10": 2.2, "DFII30": 2.3,
           "SF43936": 8.0, "SF43939": 8.1, "SF43942": 8.2, "SF43945": 8.3, "SF43883": 8.6, "SF43886": 8.8,
-          "SF44071": 9.0, "SF45384": 9.3, "SF60696": 9.5}
+          "SF44071": 9.0, "SF45384": 9.3, "SF60696": 9.5,
+          "SF61592": 4.0, "SF43924": 4.2, "SF46958": 4.4, "SF46961": 4.5}
+# Activity, external and risk series: flat levels (zero growth) are enough for the cross-feeds under test.
+ECON = {"BOPGSTB": -60000, "IEABC": -250000, "INDPRO": 100, "RSAFS": 700000, "PAYEMS": 150000, "UMCSENT": 60,
+        "EXPINF1YR": 2.5, "SE44352": -2000, "SE44355": 150000, "SE44374": 140000, "SE27803": 5000, "SF43707": 230000,
+        "SR17692": 110, "BAMLEMCBPIOAS": 2.0, "BAMLH0A0HYM2": 6.0, "rstar": 0.8}
 
 
 def fake_fetch(source: str, sid: str) -> pd.Series:
@@ -25,6 +30,8 @@ def fake_fetch(source: str, sid: str) -> pd.Series:
         return pd.Series(LEVELS[sid], index=idx)
     if sid in CURVES:
         return pd.Series(CURVES[sid], index=idx)
+    if sid in ECON:
+        return pd.Series(float(ECON[sid]), index=idx)
     if source == "yahoo":  # indices grow 8% a year; the IPC falls 20% from June 2026
         s = pd.Series([1000 * 1.08 ** (i / 12) for i in range(len(idx))], index=idx)
         if sid == "^MXX":
@@ -187,3 +194,41 @@ def test_markets_cross_feeds(report):
     assert any("IPC México" in f for f in flags["México"])
     ipc = next(i for i in m.indices if i.name == "IPC México")
     assert ipc.drawdown == pytest.approx(-0.2, abs=0.01) and ipc.cost_of_equity == report.assumptions[1].cost_of_equity()
+
+
+def test_neutral_rate_and_stance(report):
+    from macro.neutral import build_neutral, neutral_from
+    n = build_neutral(report, fake_fetch)
+    us, mx = n["US"], n["MX"]
+    # US: trend 2%, ex-ante real = 4.3 fed funds - 2.5 expected = 1.8 -> r* 1.9, nominal 3.9, policy 4.3.
+    assert us.rstar == pytest.approx((2.0 + 1.8) / 2, abs=1e-6)
+    assert us.gap == pytest.approx(4.3 - 3.9, abs=1e-6) and us.stance == "cerca de neutral"
+    assert us.external == pytest.approx(0.8)
+    # MX: trend 1%, real = 8.0 - 4.0 inflation = 4.0 -> r* 2.5, nominal 5.5, policy 8.0: restrictive.
+    assert mx.rstar == pytest.approx(2.5, abs=1e-6) and mx.stance == "restrictiva"
+    path = mx.path(pd.date_range("2026-07-01", periods=12, freq="MS"))
+    assert path.iloc[-1] == pytest.approx(mx.nominal + mx.gap / 2)   # the gap halves in a year
+    idx = pd.date_range("2020-01-01", periods=12, freq="MS")
+    with pytest.raises(sources.DataError):
+        neutral_from("US", pd.Series(4.0, index=idx), pd.Series(2.0, index=idx), 2.0, None, "")
+
+
+def test_economy_flags_and_risk(report):
+    from macro.economy import build_economy
+    from macro.economy import reasons as econ_reasons
+    from macro.markets import build_markets
+    weo = {i: fake_weo(i) for i in sources.IMF_INDICATORS}
+    e = build_economy(report, weo, fake_fetch)
+    assert e.us_trade_12m == pytest.approx(-720.0)          # 12 x -60 bn
+    assert e.mx_goods_4q == pytest.approx(4 * 10.0)         # (150 - 140) bn a period
+    assert e.hy_oas == 6.0 and any("high yield" in f for f in e.flags["Mundo"])
+    r = econ_reasons(e, build_markets(report, fake_fetch), report)
+    assert "CDS" in r["Riesgo"][0] and r["Riesgo"][0] in r["Comercio"]
+
+
+def test_parse_hlw_rejects_unknown_layout():
+    import io as _io
+    buf = _io.BytesIO()
+    pd.DataFrame({"a": [1, 2]}).to_excel(buf, sheet_name="HLW Estimates", index=False, header=False)
+    with pytest.raises(sources.DataError):
+        sources.parse_hlw(buf.getvalue())

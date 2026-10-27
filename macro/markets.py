@@ -66,6 +66,8 @@ class Markets(BaseModel):
     us_curve: Curve
     mx_curve: Curve
     us_real: dict[str, float]
+    us_real_curve: Curve
+    mx_real_curve: Curve          # Udibonos
     us_2s10s: float
     us_3m10y: float
     mx_28d10y: float
@@ -126,6 +128,8 @@ def build_markets(r: MacroReport, fetch: sources.Fetch = sources.fetch) -> Marke
             spread[t_us] = round(a - b, 3)
     return Markets(
         as_of=as_of, indices=stats, ipc_usd=ipc_usd, us_curve=us_curve, mx_curve=mx_curve, us_real=real,
+        us_real_curve=_curve("US", sources.load("US_REAL", as_of, fetch), as_of),
+        mx_real_curve=_curve("MX", sources.load("MX_REAL", as_of, fetch), as_of),
         us_2s10s=float(s2s10.dropna().iloc[-1]), us_3m10y=float(s3m10y.dropna().iloc[-1]),
         mx_28d10y=mx_curve.at("10y") - mx_curve.at("28d"),
         recession_prob=recession_probability(float(s3m10y.dropna().iloc[-1])),
@@ -136,12 +140,12 @@ def build_markets(r: MacroReport, fetch: sources.Fetch = sources.fetch) -> Marke
     )
 
 
-def reasons(m: Markets, r: MacroReport) -> list[str]:
-    """Why markets are where they are, read against the macro regime, real rates and the curve."""
+def reasons(m: Markets, r: MacroReport) -> dict[str, list[str]]:
+    """Why curves and markets are where they are, read against the macro regime and real rates: {"Curvas", "Mercados"}."""
     by = {i.name: i for i in m.indices}
     sp, ipc = by["S&P 500"], by["IPC México"]
     real10 = m.us_real.get("10y")
-    out = [
+    curves = [
         f"La curva de Treasuries tiene 2s10s de {m.us_2s10s:+.2f} pp y 3m10y de {m.us_3m10y:+.2f} pp: "
         + ("invertida, el mercado espera recortes fuertes porque ve la economía debilitarse." if m.us_3m10y < 0 else
            "positiva, el mercado no descuenta recesión.")
@@ -154,8 +158,15 @@ def reasons(m: Markets, r: MacroReport) -> list[str]:
         + ("descuentan recortes." if m.mx_policy_gap < -0.15 else "descuentan alzas." if m.mx_policy_gap > 0.15
            else "no descuentan cambios grandes."),
     ]
+    be_mx = m.mx_curve.at("10y") - m.mx_real_curve.at("10y") if m.mx_real_curve.at("10y") is not None else None
+    if be_mx is not None:
+        curves.append(f"En México el Bono M a 10 años ({m.mx_curve.at('10y'):.2f}%) menos el Udibono a 10 años "
+                      f"({m.mx_real_curve.at('10y'):.2f}% real) da una inflación implícita de {be_mx:.2f}%, "
+                      + ("arriba de la meta de 3% de Banxico: el mercado duda de que la inflación converja."
+                         if be_mx > 3.5 else "cerca de la meta de 3% de Banxico."))
+    out = []
     if real10 is not None:
-        out.append(f"La tasa real a 10 años (TIPS) es {real10:.2f}%"
+        curves.append(f"La tasa real a 10 años (TIPS) es {real10:.2f}%"
                    + (": alta, sube la tasa de descuento y presiona los múltiplos de las acciones, más en las de crecimiento."
                       if real10 > 2 else ": moderada, no castiga de más las valuaciones."))
     regime = {"stagflation": "estanflación, el régimen más difícil para acciones: márgenes apretados y tasas que no bajan",
@@ -177,7 +188,7 @@ def reasons(m: Markets, r: MacroReport) -> list[str]:
     worst = min(m.indices, key=lambda i: i.drawdown)
     out.append(f"El índice más lejos de su máximo de 52 semanas es {worst.name} ({worst.drawdown:.1%}); "
                f"el más volátil a 3 meses es {max(m.indices, key=lambda i: i.vol_3m).name}.")
-    return out
+    return {"Curvas": curves, "Mercados": out}
 
 
 def _index(name: str, s: pd.Series, currency: str, coe: float) -> IndexStats:

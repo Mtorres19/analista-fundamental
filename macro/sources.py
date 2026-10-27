@@ -1,4 +1,4 @@
-"""Where the macro data comes from: FRED, Banxico SIE, the IMF and Yahoo Finance (indices).
+"""Where the macro data comes from: FRED, Banxico SIE, the IMF, the NY Fed (r*) and Yahoo Finance (indices).
 
 Every series the analysis reads is declared once in SERIES, with its source,
 its id there, and its publication lag. `load` cuts each series at as_of minus
@@ -25,6 +25,7 @@ import requests
 FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 BANXICO_API = "https://www.banxico.org.mx/SieAPIRest/service/v1/series/{id}/datos"
 IMF_API = "https://www.imf.org/external/datamapper/api/v1/{indicator}"
+HLW_XLSX = "https://www.newyorkfed.org/medialibrary/media/research/economists/williams/data/Holston_Laubach_Williams_current_estimates.xlsx"
 
 # region -> name -> (source, series id, publication lag in days).
 # FRED dates a quarter by its first day, so quarterly lags count from there.
@@ -66,10 +67,36 @@ SERIES: dict[str, dict[str, tuple[str, str, int]]] = {
         ("S&P 500", "^GSPC"), ("Nasdaq", "^IXIC"), ("Dow Jones", "^DJI"), ("Russell 2000", "^RUT"),
         ("IPC México", "^MXX"), ("Euro Stoxx 50", "^STOXX50E"), ("Nikkei 225", "^N225"), ("FTSE 100", "^FTSE"),
         ("Emergentes (EEM)", "EEM"))},
+    # Udibonos: real yields at auction, %.
+    "MX_REAL": {t: ("banxico", sid, 1) for t, sid in (
+        ("3y", "SF61592"), ("10y", "SF43924"), ("20y", "SF46958"), ("30y", "SF46961"))},
+    "US_ECON": {
+        "trade_balance": ("fred", "BOPGSTB", 40),       # goods & services, USD mn, monthly
+        "current_account": ("fred", "IEABC", 90),       # USD mn, quarterly
+        "industrial_production": ("fred", "INDPRO", 20),
+        "retail_sales": ("fred", "RSAFS", 20),           # USD mn, monthly
+        "payrolls": ("fred", "PAYEMS", 10),              # thousands
+        "sentiment": ("fred", "UMCSENT", 10),            # U. Michigan
+        "inflation_exp_1y": ("fred", "EXPINF1YR", 20),   # Cleveland Fed, %
+    },
+    "MX_ECON": {
+        "current_account": ("banxico", "SE44352", 60),   # USD mn, quarterly (BoP, MBP6)
+        "exports": ("banxico", "SE44355", 60),           # goods exports, USD mn, quarterly
+        "imports": ("banxico", "SE44374", 60),           # goods imports, USD mn, quarterly
+        "remittances": ("banxico", "SE27803", 35),       # USD mn, monthly
+        "reserves": ("banxico", "SF43707", 7),           # USD mn, weekly
+        "igae": ("banxico", "SR17692", 60),              # activity index, base 2018
+    },
+    "RISK": {
+        "em_corp_oas": ("fred", "BAMLEMCBPIOAS", 1),     # ICE BofA EM corporate OAS, pp
+        "us_hy_oas": ("fred", "BAMLH0A0HYM2", 1),        # ICE BofA US high yield OAS, pp
+    },
+    # NY Fed Holston-Laubach-Williams one-sided estimates, quarterly dated at the quarter's start.
+    "EXTERNAL": {"hlw_rstar_us": ("nyfed", "rstar", 120)},
 }
 
 # IMF World Economic Outlook: real GDP growth and average CPI inflation, % per year.
-IMF_INDICATORS = ("NGDP_RPCH", "PCPIPCH")
+IMF_INDICATORS = ("NGDP_RPCH", "PCPIPCH", "BCA_NGDPD", "GGXWDG_NGDP", "GGXCNL_NGDP")  # + current account, gross debt, fiscal balance, % of GDP
 # The G20 economies (EU aside) the global breadth is measured on.
 G20 = ("USA", "MEX", "CHN", "JPN", "DEU", "IND", "GBR", "FRA", "ITA", "BRA",
        "CAN", "RUS", "KOR", "AUS", "ESP", "IDN", "TUR", "SAU", "ARG", "ZAF")
@@ -89,6 +116,8 @@ def fetch(source: str, series_id: str) -> pd.Series:
         return _banxico(series_id)
     if source == "yahoo":
         return _yahoo(series_id)
+    if source == "nyfed":
+        return parse_hlw(_get(HLW_XLSX).content)
     raise ValueError(f"unknown source {source!r}")
 
 
@@ -118,6 +147,18 @@ def parse_imf(payload: dict, indicator: str) -> pd.DataFrame:
         raise DataError(f"IMF {indicator}: unexpected payload") from exc
     df = pd.DataFrame({c: {int(y): v for y, v in years.items()} for c, years in values.items()})
     return df.sort_index()
+
+
+def parse_hlw(xlsx: bytes) -> pd.Series:
+    """US natural rate (r*, %) from the NY Fed HLW workbook: the 'Natural Rate (r*)' block's US column."""
+    try:
+        df = pd.read_excel(io.BytesIO(xlsx), sheet_name="HLW Estimates", header=None)
+        col = next(c for c in df.columns if str(df.iat[4, c]).startswith("Natural Rate"))
+        assert str(df.iat[5, col]).strip() == "US"
+        body = df.iloc[6:, [0, col]].dropna()
+    except Exception as exc:
+        raise DataError(f"NY Fed HLW: unexpected workbook layout ({exc})") from exc
+    return pd.Series(body.iloc[:, 1].astype(float).values, index=pd.to_datetime(body.iloc[:, 0]))
 
 
 def parse_banxico(payload: dict) -> pd.Series:

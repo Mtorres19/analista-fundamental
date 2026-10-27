@@ -62,10 +62,10 @@ def _check() -> int:
         for name, (source, sid, _) in series.items():
             try:
                 s = sources.fetch(source, sid)
-                print(f"ok    {region:6} {name:15} {source}:{sid}  último {s.index[-1].date()}")
+                print(f"ok    {region:9} {name:22} {source}:{sid}  último {s.index[-1].date()}")
             except Exception as exc:  # report every failure, not just the first
                 failed += 1
-                print(f"FALLA {region:6} {name:15} {source}:{sid}  {exc}")
+                print(f"FALLA {region:9} {name:22} {source}:{sid}  {exc}")
     for ind in sources.IMF_INDICATORS:
         try:
             years = sources.imf_weo(ind).index
