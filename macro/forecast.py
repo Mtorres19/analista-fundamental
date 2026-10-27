@@ -34,8 +34,10 @@ def forecast(series: pd.Series, horizon: int, freq: str = "MS", fit_years: int =
     b = 0.0 if var < 1e-12 else min(float(np.cov(x0, x1, bias=True)[0, 1] / var), 0.99)
     a = float(np.mean(x1 - b * x0))
     resid = x1 - (a + b * x0)
-    # Robust to one shock (2020), but series that move in steps (policy rates) have a near-zero MAD: floor it.
-    sigma = max(1.4826 * float(np.median(np.abs(resid - np.median(resid)))), 0.5 * float(np.std(resid)))
+    # Robust to one shock (2020), but series that move in steps (policy rates) have a near-zero MAD: floor it
+    # with the std of the residuals minus their largest 10%, which drops the COVID months/quarters.
+    trimmed = resid[np.abs(resid) <= np.quantile(np.abs(resid), 0.9)]
+    sigma = max(1.4826 * float(np.median(np.abs(resid - np.median(resid)))), float(np.std(trimmed)))
     ar, x = [], float(s.iloc[-1])
     for _ in steps:
         x = a + b * x
