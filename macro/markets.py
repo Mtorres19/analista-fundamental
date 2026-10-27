@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pandas as pd
 from pydantic import BaseModel
 
@@ -33,6 +34,45 @@ def recession_probability(spread_3m10y_pp: float) -> float:
     return 0.5 * (1 + math.erf(z / math.sqrt(2)))
 
 
+STD_TENORS = (1, 2, 3, 5, 7, 10, 20, 30)   # years, where curves are compared on their fitted values
+
+
+class NSS(BaseModel):
+    """Nelson-Siegel(-Svensson) curve: yield in % at maturity t in years. tau2 None = plain Nelson-Siegel."""
+    betas: list[float]
+    tau1: float
+    tau2: float | None = None
+
+    def __call__(self, t):
+        y = _ns_basis(np.atleast_1d(np.asarray(t, float)), self.tau1, self.tau2) @ np.asarray(self.betas)
+        return float(y[0]) if np.ndim(t) == 0 else y
+
+
+def _ns_basis(t: np.ndarray, tau1: float, tau2: float | None) -> np.ndarray:
+    hump = lambda tau: ((1 - np.exp(-t / tau)) / (t / tau), (1 - np.exp(-t / tau)) / (t / tau) - np.exp(-t / tau))
+    f1, f2 = hump(tau1)
+    cols = [np.ones_like(t), f1, f2] + ([hump(tau2)[1]] if tau2 is not None else [])
+    return np.column_stack(cols)
+
+
+def fit_nss(years: list[float], yields: list[float]) -> NSS:
+    """Least squares on the betas over a grid of decay parameters. Svensson only with 7+ nodes, else Nelson-Siegel,
+    so a short curve (the real ones have 4-5 nodes) is not over-fitted."""
+    t, y = np.asarray(years, float), np.asarray(yields, float)
+    if len(t) < 4:
+        raise sources.DataError(f"curve fit needs at least 4 nodes, got {len(t)}")
+    best = None
+    for tau1 in np.geomspace(0.1, 10, 40):
+        for tau2 in (np.geomspace(tau1 * 1.5, 30, 16) if len(t) >= 7 else [None]):
+            X = _ns_basis(t, tau1, tau2)
+            b = np.linalg.lstsq(X, y, rcond=None)[0]
+            err = float(((X @ b - y) ** 2).sum())
+            if best is None or err < best[0] - 1e-12:
+                best = (err, b, tau1, tau2)
+    _, b, tau1, tau2 = best
+    return NSS(betas=[float(x) for x in b], tau1=float(tau1), tau2=None if tau2 is None else float(tau2))
+
+
 class Curve(BaseModel):
     country: str
     tenors: list[str]
@@ -40,6 +80,7 @@ class Curve(BaseModel):
     now: list[float | None]
     m3: list[float | None]      # three months before as_of
     y1: list[float | None]      # a year before as_of
+    fits: dict[str, NSS | None]  # "now" / "m3" / "y1" -> fitted curve, None with too few nodes that day
 
     def at(self, tenor: str) -> float | None:
         return self.now[self.tenors.index(tenor)]
@@ -117,15 +158,14 @@ def build_markets(r: MacroReport, fetch: sources.Fetch = sources.fetch) -> Marke
                 raise sources.DataError(f"{c.country} curve: no {t} yield in the 60 days before {as_of}")
     s3m10y = us_c["10y"] - us_c["3m"].reindex(us_c["10y"].index)
     s2s10 = us_c["10y"] - us_c["2y"].reindex(us_c["10y"].index)
-    monthly = lambda s: s.dropna().resample("MS").mean().dropna()
-    hist = lambda s: monthly(s)[monthly(s).index > pd.Timestamp(as_of) - pd.DateOffset(years=20)]
+    hist = lambda s: s.dropna()[s.dropna().index > pd.Timestamp(as_of) - pd.DateOffset(years=10)]   # daily
     prob = hist(s3m10y).apply(recession_probability) * 100
 
-    spread = {}
-    for t_mx, t_us in (("364d", "1y"), ("3y", "3y"), ("5y", "5y"), ("10y", "10y"), ("20y", "20y"), ("30y", "30y")):
-        a, b = mx_curve.at(t_mx), us_curve.at(t_us)
-        if a is not None and b is not None:
-            spread[t_us] = round(a - b, 3)
+    # On the fitted curves, so tenors one country does not issue still compare.
+    fm, fu = mx_curve.fits["now"], us_curve.fits["now"]
+    if fm is None or fu is None:
+        raise sources.DataError("curve fit: fewer than 4 nodes today on the US or Mexico curve")
+    spread = {f"{t}y": round(float(fm(t) - fu(t)), 3) for t in STD_TENORS}
     return Markets(
         as_of=as_of, indices=stats, ipc_usd=ipc_usd, us_curve=us_curve, mx_curve=mx_curve, us_real=real,
         us_real_curve=_curve("US", sources.load("US_REAL", as_of, fetch), as_of),
@@ -135,7 +175,7 @@ def build_markets(r: MacroReport, fetch: sources.Fetch = sources.fetch) -> Marke
         recession_prob=recession_probability(float(s3m10y.dropna().iloc[-1])),
         us_policy_gap=us_curve.at("2y") - r.us.policy_rate * 100,
         mx_policy_gap=mx_curve.at("364d") - r.mx.policy_rate * 100,
-        mx_us_spread=spread, mx_spread_10y=spread["10y"],
+        mx_us_spread=spread, mx_spread_10y=mx_curve.at("10y") - us_curve.at("10y"),
         slopes={"2s10s": _pts(hist(s2s10)), "3m10y": _pts(hist(s3m10y)), "prob": _pts(prob)},
     )
 
@@ -214,9 +254,12 @@ def _curve(country: str, s: dict[str, pd.Series], as_of: str) -> Curve:
     at = lambda ser, when: (None if ser[ser.index <= when].empty or ser[ser.index <= when].index[-1] < when - pd.Timedelta(days=60)
                             else round(float(ser[ser.index <= when].iloc[-1]), 3))
     tenors = list(s)
-    return Curve(country=country, tenors=tenors, years=[tenor_years(k) for k in tenors],
-                 now=[at(s[k], t) for k in tenors], m3=[at(s[k], t - pd.DateOffset(months=3)) for k in tenors],
-                 y1=[at(s[k], t - pd.DateOffset(years=1)) for k in tenors])
+    years = [tenor_years(k) for k in tenors]
+    dates = {"now": t, "m3": t - pd.DateOffset(months=3), "y1": t - pd.DateOffset(years=1)}
+    vals = {k: [at(s[x], d) for x in tenors] for k, d in dates.items()}
+    fit = lambda v: (fit_nss([y for y, x in zip(years, v) if x is not None], [x for x in v if x is not None])
+                     if sum(x is not None for x in v) >= 4 else None)
+    return Curve(country=country, tenors=tenors, years=years, **vals, fits={k: fit(v) for k, v in vals.items()})
 
 
 def _pts(series: pd.Series) -> list[list]:

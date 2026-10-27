@@ -14,7 +14,8 @@ GROWING = {"CPIAUCSL": 0.03, "SP1": 0.04, "GDPC1": 0.02, "NGDPRSAXDCMXQ": 0.01,
 # Curves: an inverted Treasury curve (3m 5.0 > 10y 4.2), real 10y above 2%, a normal Mexican curve.
 CURVES = {"DGS1MO": 5.0, "DGS3MO": 5.0, "DGS6MO": 4.9, "DGS1": 4.8, "DGS2": 4.5, "DGS3": 4.4, "DGS5": 4.3,
           "DGS7": 4.25, "DGS20": 4.4, "DGS30": 4.5, "DFII5": 2.1, "DFII10": 2.2, "DFII30": 2.3,
-          "SF43936": 8.0, "SF43939": 8.1, "SF43942": 8.2, "SF43945": 8.3, "SF43883": 8.6, "SF43886": 8.8,
+          "DFII7": 2.15, "DFII20": 2.25, "SF331451": 7.9,
+          "SF45470": 8.0, "SF45471": 8.1, "SF45472": 8.2, "SF45473": 8.3, "SF43883": 8.6, "SF43886": 8.8,
           "SF44071": 9.0, "SF45384": 9.3, "SF60696": 9.5,
           "SF61592": 4.0, "SF43924": 4.2, "SF46958": 4.4, "SF46961": 4.5}
 # Activity, external and risk series: flat levels (zero growth) are enough for the cross-feeds under test.
@@ -186,7 +187,7 @@ def test_markets_cross_feeds(report):
     assert m.recession_prob == pytest.approx(0.5, abs=0.05)
     assert m.us_policy_gap == pytest.approx(4.5 - 4.3)        # 2y over fed funds
     assert m.mx_spread_10y == pytest.approx(9.0 - 4.2)
-    assert m.mx_us_spread["1y"] == pytest.approx(8.3 - 4.8)
+    assert m.mx_us_spread["1y"] == pytest.approx(8.3 - 4.8, abs=0.15)   # on the fitted curves
     assert m.us_curve.years[0] == pytest.approx(1 / 12)
     flags = m.flags
     assert any("invertida" in f for f in flags["EE.UU."])
@@ -232,3 +233,18 @@ def test_parse_hlw_rejects_unknown_layout():
     pd.DataFrame({"a": [1, 2]}).to_excel(buf, sheet_name="HLW Estimates", index=False, header=False)
     with pytest.raises(sources.DataError):
         sources.parse_hlw(buf.getvalue())
+
+
+def test_nss_fit_recovers_known_curve():
+    import numpy as np
+    from macro.markets import NSS, fit_nss
+    true = NSS(betas=[5.0, -1.5, 2.0, -1.0], tau1=1.8, tau2=8.0)
+    years = [1 / 12, 0.25, 0.5, 1, 2, 3, 5, 7, 10, 20, 30]
+    fit = fit_nss(years, list(true(years)))
+    grid = np.linspace(0.1, 30, 60)
+    assert np.abs(fit(grid) - true(grid)).max() < 0.03          # within 3bp across the curve
+    assert fit(30) == pytest.approx(true(30), abs=0.01)
+    ns = fit_nss([3, 10, 20, 30], [4.0, 4.2, 4.4, 4.5])        # few nodes -> plain Nelson-Siegel
+    assert ns.tau2 is None and len(ns.betas) == 3
+    with pytest.raises(sources.DataError):
+        fit_nss([1, 2, 3], [4, 4, 4])

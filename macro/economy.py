@@ -100,7 +100,7 @@ def build_economy(r: MacroReport, weo: dict[str, pd.DataFrame], fetch: sources.F
         imf=imf, year=year,
         charts={"us_trade": pts(bn(us["trade_balance"])), "mx_goods": pts(bn(goods)),
                 "mx_remit": pts(bn(remit_12m)), "mx_reserves": pts(bn(reserves)),
-                "em_oas": pts(m(risk["em_corp_oas"])), "hy_oas": pts(m(risk["us_hy_oas"]))},
+                "em_oas": pts(risk["em_corp_oas"].dropna()), "hy_oas": pts(risk["us_hy_oas"].dropna())},  # daily
     )
 
 

@@ -57,11 +57,13 @@ SERIES: dict[str, dict[str, tuple[str, str, int]]] = {
     "US_CURVE": {t: ("fred", sid, 1) for t, sid in (
         ("1m", "DGS1MO"), ("3m", "DGS3MO"), ("6m", "DGS6MO"), ("1y", "DGS1"), ("2y", "DGS2"), ("3y", "DGS3"),
         ("5y", "DGS5"), ("7y", "DGS7"), ("10y", "DGS10"), ("20y", "DGS20"), ("30y", "DGS30"))},
-    "US_REAL": {t: ("fred", sid, 1) for t, sid in (("5y", "DFII5"), ("10y", "DFII10"), ("30y", "DFII30"))},
-    # Banxico weekly auction yields (CETES and fixed-rate Bonos M); a tenor is only auctioned every few weeks.
+    "US_REAL": {t: ("fred", sid, 1) for t, sid in (
+        ("5y", "DFII5"), ("7y", "DFII7"), ("10y", "DFII10"), ("20y", "DFII20"), ("30y", "DFII30"))},
+    # Short end daily: TIIE de fondeo (overnight) and CETES from Banxico's daily price vector (secondary market).
+    # Bonos M: weekly auction yields, the only free source; a tenor is auctioned every few weeks.
     "MX_CURVE": {t: ("banxico", sid, 1) for t, sid in (
-        ("28d", "SF43936"), ("91d", "SF43939"), ("182d", "SF43942"), ("364d", "SF43945"), ("3y", "SF43883"),
-        ("5y", "SF43886"), ("10y", "SF44071"), ("20y", "SF45384"), ("30y", "SF60696"))},
+        ("1d", "SF331451"), ("28d", "SF45470"), ("91d", "SF45471"), ("182d", "SF45472"), ("364d", "SF45473"),
+        ("3y", "SF43883"), ("5y", "SF43886"), ("10y", "SF44071"), ("20y", "SF45384"), ("30y", "SF60696"))},
     # name -> Yahoo Finance ticker, daily closes in local currency.
     "INDICES": {n: ("yahoo", t, 1) for n, t in (
         ("S&P 500", "^GSPC"), ("Nasdaq", "^IXIC"), ("Dow Jones", "^DJI"), ("Russell 2000", "^RUT"),
@@ -87,6 +89,8 @@ SERIES: dict[str, dict[str, tuple[str, str, int]]] = {
         "reserves": ("banxico", "SF43707", 7),           # USD mn, weekly
         "igae": ("banxico", "SR17692", 60),              # activity index, base 2018
     },
+    # Daily prices for the market charts where the macro series is monthly.
+    "DAILY": {"copper": ("yahoo", "HG=F", 1)},     # COMEX copper future, USD per pound
     "RISK": {
         "em_corp_oas": ("fred", "BAMLEMCBPIOAS", 1),     # ICE BofA EM corporate OAS, pp
         "us_hy_oas": ("fred", "BAMLH0A0HYM2", 1),        # ICE BofA US high yield OAS, pp

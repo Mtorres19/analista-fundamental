@@ -10,6 +10,7 @@ import json
 from datetime import datetime
 from functools import cache
 
+import numpy as np
 import pandas as pd
 
 from macro import sources
@@ -46,13 +47,16 @@ def build_dashboard(as_of: str, erp: float = DEFAULT_ERP, fetch: sources.Fetch =
 
     charts, forecasts = {}, []
 
-    def add(key, title, unit, hist, freq="MS", imf=None, extra=(), market=None, anchor=None, chart=True):
-        """anchor: (label, index -> Series), a path the macro side implies (neutral rate, cost of equity)."""
+    def add(key, title, unit, hist, freq="MS", imf=None, extra=(), market=None, anchor=None, chart=True, daily=None):
+        """anchor: (label, index -> Series), a path the macro side implies (neutral rate, cost of equity).
+        daily: the same series day by day, drawn instead of the monthly history (models still fit monthly)."""
         fc = forecast(hist, 4 if freq == "QS" else 12, freq)
         if anchor is not None:
             fc["anchor"] = anchor[1](fc.index)
         if chart:
-            charts[key] = _chart(title, unit, hist, fc, imf, extra, anchor[0] if anchor else None)
+            charts[key] = _chart(title, unit, hist if daily is None else _recent(daily.dropna(), 5), fc, imf, extra,
+                                 anchor[0] if anchor else None)
+            charts[key]["daily"] = daily is not None
         end = fc.iloc[-1]
         forecasts.append({"name": title, "unit": unit, "now": float(hist.iloc[-1]), "drift": end.drift,
                           "ar1": end.ar1, "lo": end.lo, "hi": end.hi, "ensemble": end.ensemble,
@@ -78,18 +82,17 @@ def build_dashboard(as_of: str, erp: float = DEFAULT_ERP, fetch: sources.Fetch =
         add(f"{c}_unemp", f"Desempleo {name}", "%", _recent(_monthly(d["unemployment"])))
         gdp = d["gdp"].resample("QS").last().dropna()
         add(f"{c}_gdp", f"PIB real anual {name}", "%", _recent(_yoy_pct(gdp)), "QS", imf=imf_g)
-    add("MX_fx", "Pesos por dólar", "", _recent(_monthly(s["MX"]["fx_usd"])))
-    g = s["GLOBAL"]
-    add("brent", "Petróleo Brent (USD/barril)", "", _recent(_monthly(g["brent"])))
-    add("copper", "Cobre (USD/tonelada)", "", _recent(_monthly(g["copper"])))
-    add("dollar", "Dólar amplio (índice)", "", _recent(_monthly(g["dollar"])))
-    add("vix", "VIX (miedo del mercado)", "", _recent(_monthly(g["vix"])))
+    g, dly = s["GLOBAL"], s["DAILY"]
+    for key, title, ser in (("MX_fx", "Pesos por dólar", s["MX"]["fx_usd"]), ("brent", "Petróleo Brent (USD/barril)", g["brent"]),
+                            ("copper", "Cobre (USD/libra, futuro COMEX)", dly["copper"]),
+                            ("dollar", "Dólar amplio (índice)", g["dollar"]), ("vix", "VIX (miedo del mercado)", g["vix"])):
+        add(key, title, "", _recent(_monthly(ser)), daily=ser)
     for ix in m.indices:
         last = float(s["INDICES"][ix.name].iloc[-1])
         # The macro side's required return, compounded monthly from the last close.
         required = lambda idx, last=last, coe=ix.cost_of_equity: last * (1 + coe) ** (pd.Series(range(1, len(idx) + 1), index=idx) / 12)
         add("ix_" + ix.name, ix.name, "", _recent(_monthly(s["INDICES"][ix.name])),
-            anchor=("Rentabilidad exigida (costo de capital)", required), chart=ix.name in ("S&P 500", "IPC México"))
+            anchor=("Rentabilidad exigida (costo de capital)", required), daily=s["INDICES"][ix.name])
 
     growth = sorted(r.world.growth.items(), key=lambda kv: -kv[1])
     data = {
@@ -267,15 +270,16 @@ def _chart(title, unit, hist, fc, imf, extra, anchor_label=None) -> dict:
     lines = [{"label": "Histórico", "role": "hist", "points": _pts(hist)}]
     for i, (label, ser) in enumerate(extra):
         lines.append({"label": label, "role": f"extra{i + 1}", "points": _pts(ser)})
+    start = _pts(hist.iloc[-1:])  # every forecast line starts at the last print, so there is no gap
     lines += [
-        {"label": "_lo", "role": "band", "points": _pts(fc["lo"])},
-        {"label": "Banda 90%", "role": "band", "points": _pts(fc["hi"]), "fill": True},
-        {"label": "Reversión a la media (AR)", "role": "ar", "points": _pts(fc["ar1"])},
-        {"label": "Tendencia (amortiguada)", "role": "drift", "points": _pts(fc["drift"])},
-        {"label": "Promedio de modelos", "role": "ens", "points": _pts(fc["ensemble"])},
+        {"label": "_lo", "role": "band", "points": start + _pts(fc["lo"])},
+        {"label": "Banda 90%", "role": "band", "points": start + _pts(fc["hi"]), "fill": True},
+        {"label": "Reversión a la media (AR)", "role": "ar", "points": start + _pts(fc["ar1"])},
+        {"label": "Tendencia (amortiguada)", "role": "drift", "points": start + _pts(fc["drift"])},
+        {"label": "Promedio de modelos", "role": "ens", "points": start + _pts(fc["ensemble"])},
     ]
     if "anchor" in fc:
-        lines.append({"label": anchor_label, "role": "anchor", "points": _pts(fc["anchor"])})
+        lines.append({"label": anchor_label, "role": "anchor", "points": start + _pts(fc["anchor"])})
     if imf is not None and not imf.empty:
         lines.append({"label": "FMI (promedio anual)", "role": "imf", "points": _pts(imf), "scatter": True})
     return {"title": title, "unit": unit, "lines": lines}
@@ -347,30 +351,35 @@ IMF_LABEL = {"BCA_NGDPD": "Cuenta corriente", "GGXCNL_NGDP": "Balance fiscal", "
 
 def _specs(m: Markets, n: dict[str, Neutral], e: Economy) -> dict[str, dict]:
     """Charts that are not one forecast series: curves by tenor, bars by category, several series over time."""
-    def tenor(curve, label, color, dash=()):
-        return {"label": label, "color": color, "dash": list(dash),
-                "points": [[y, v] for y, v in zip(curve.years, curve.now) if v is not None]}
-    def dated(curve, key, label, color, dash):
-        return {"label": label, "color": color, "dash": dash,
-                "points": [[y, v] for y, v in zip(curve.years, getattr(curve, key)) if v is not None]}
-    curve = lambda c: {"kind": "tenor", "unit": "%", "series": [dated(c, "now", "Hoy", "s1", []), dated(c, "m3", "Hace 3 meses", "s3", [5, 4]),
-                                                                dated(c, "y1", "Hace un año", "muted", [2, 3])]}
+    grid = np.geomspace(1 / 365, 30, 80)
+    def fitted(curve, key, label, color, dash=()):
+        f = curve.fits[key]
+        return [] if f is None else [{"label": label, "color": color, "dash": list(dash),
+                                      "points": [[round(float(t), 4), round(float(v), 3)] for t, v in zip(grid, f(grid))
+                                                 if min(curve.years) <= t <= max(curve.years)]}]  # no extrapolation
+    def nodes(curve, key, label, color):
+        obs = [(k, y, v) for k, y, v in zip(curve.tenors, curve.years, getattr(curve, key)) if v is not None]
+        return {"label": label, "color": color, "dots": True, "tenors": [k for k, _, _ in obs], "points": [[y, v] for _, y, v in obs]}
+    curve = lambda c: {"kind": "tenor", "unit": "%", "series": fitted(c, "now", "Hoy (curva ajustada)", "s1")
+                       + fitted(c, "m3", "Hace 3 meses", "s3", [5, 4]) + fitted(c, "y1", "Hace un año", "muted", [2, 3])
+                       + [nodes(c, "now", "Hoy (nodos observados)", "s1")]}
     bars = lambda pts, label, fmt: {"kind": "cat", "unit": " mmd", "labels": [_ym(t, fmt) for t, _ in pts], "series": [{"label": label, "color": "s2", "values": [v for _, v in pts]}]}
     flat = lambda key: [[t, v] for t, v in e.charts[key]]
     spec = {
         "curve_US": curve(m.us_curve), "curve_MX": curve(m.mx_curve),
-        "real_curves": {"kind": "tenor", "unit": "%", "series": [tenor(m.us_real_curve, "EE.UU. (TIPS)", "s1"),
-                                                                 tenor(m.mx_real_curve, "México (Udibonos)", "s2")]},
+        "real_curves": {"kind": "tenor", "unit": "%", "series": fitted(m.us_real_curve, "now", "EE.UU. (TIPS)", "s1")
+                        + fitted(m.mx_real_curve, "now", "México (Udibonos)", "s2")
+                        + [nodes(m.us_real_curve, "now", "Nodos EE.UU.", "s1"), nodes(m.mx_real_curve, "now", "Nodos México", "s2")]},
         "spread": {"kind": "cat", "unit": " pp", "labels": [k.replace("y", "a") for k in m.mx_us_spread],
                    "series": [{"label": "México menos EE.UU.", "color": "s2", "values": list(m.mx_us_spread.values())}]},
-        "slopes": {"kind": "time", "unit": " pp", "ref": 0, "series": [{"label": "10a – 2a", "color": "s1", "points": m.slopes["2s10s"]},
+        "slopes": {"kind": "time", "daily": True, "unit": " pp", "ref": 0, "series": [{"label": "10a – 2a", "color": "s1", "points": m.slopes["2s10s"]},
                                                                         {"label": "10a – 3m", "color": "s2", "points": m.slopes["3m10y"]}]},
-        "prob": {"kind": "time", "unit": "%", "ref": 30, "series": [{"label": "Probabilidad de recesión", "color": "s5", "points": m.slopes["prob"]}]},
+        "prob": {"kind": "time", "daily": True, "unit": "%", "ref": 30, "series": [{"label": "Probabilidad de recesión", "color": "s5", "points": m.slopes["prob"]}]},
         "us_trade": bars(flat("us_trade")[-36:], "Balanza comercial EE.UU.", "%b %y"),
         "mx_goods": bars(flat("mx_goods")[-20:], "Balanza de mercancías México", "q"),
         "mx_remit": {"kind": "time", "unit": " mmd", "series": [{"label": "Remesas, suma 12 meses", "color": "s1", "points": flat("mx_remit")}]},
         "mx_reserves": {"kind": "time", "unit": " mmd", "series": [{"label": "Reservas internacionales", "color": "s1", "points": flat("mx_reserves")}]},
-        "credit": {"kind": "time", "unit": " pp", "series": [{"label": "Corporativos emergentes (OAS)", "color": "s1", "points": flat("em_oas")},
+        "credit": {"kind": "time", "daily": True, "unit": " pp", "series": [{"label": "Corporativos emergentes (OAS)", "color": "s1", "points": flat("em_oas")},
                                                               {"label": "High yield EE.UU. (OAS)", "color": "s2", "points": flat("hy_oas")}]},
     }
     for c, x in n.items():
@@ -400,9 +409,9 @@ def _yoy_pct(series: pd.Series) -> pd.Series:
     return (series / series.shift(freq=pd.DateOffset(years=1)) - 1) * 100
 
 
-def _recent(series: pd.Series) -> pd.Series:
+def _recent(series: pd.Series, years: int = HISTORY_YEARS) -> pd.Series:
     series = series.dropna()
-    return series[series.index > series.index[-1] - pd.DateOffset(years=HISTORY_YEARS)]
+    return series[series.index > series.index[-1] - pd.DateOffset(years=years)]
 
 
 def _pts(series: pd.Series) -> list[list]:
@@ -551,6 +560,13 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--grid);
   .dot-pulse { animation: pulse 2.4s ease-out infinite; transform-box: fill-box; transform-origin: center; }
   @keyframes pulse { 0% { transform: scale(1); opacity: .55; } 80%, 100% { transform: scale(3.2); opacity: 0; } }
 }
+.ranges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -16px 0 18px; font: 500 11px/1 var(--mono); color: var(--muted);
+  letter-spacing: .08em; text-transform: uppercase; }
+.ranges span { margin-right: 4px; }
+.ranges button { font: 500 12px/1 var(--mono); color: var(--ink-2); background: transparent; border: 1px solid var(--ring); border-radius: 999px;
+  padding: 7px 11px; cursor: pointer; transition: color .2s, background .2s, border-color .2s; }
+.ranges button:hover { color: var(--ink); border-color: rgba(255,255,255,.2); }
+.ranges button.on { color: var(--ink); background: var(--card-2); border-color: rgba(255,255,255,.22); }
 .ixgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 210px), 1fr)); gap: 10px; margin-top: 14px; }
 .ix { background: var(--card); border: 1px solid var(--ring); border-radius: var(--r); padding: 14px 16px 12px; min-width: 0;
   transition: transform .25s var(--ease), border-color .25s; }
@@ -594,6 +610,10 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--grid);
 <div class="legend-card rise" style="--i:3" id="legend"></div>
 <div id="resumen-body"></div>
 </section>
+<div class="ranges" role="group" aria-label="Periodo de las gráficas"><span>Periodo</span>
+  <button type="button" data-r="auto" class="on">Auto</button><button type="button" data-r="1m">1M</button><button type="button" data-r="3m">3M</button>
+  <button type="button" data-r="6m">6M</button><button type="button" data-r="ytd">Año</button><button type="button" data-r="1y">1A</button>
+  <button type="button" data-r="5y">5A</button><button type="button" data-r="all">Todo</button></div>
 <div id="app"></div>
 <footer><span id="foot"></span><span>No es recomendación de inversión.</span></footer>
 </main>
@@ -697,6 +717,7 @@ for (const [id, name, sub, keys, g20] of SECTIONS) {
 }
 // Markets
 const MK = D.markets;
+const ixChart = ix => `<div class="card"><h3>${esc(ix.name)}</h3><p class="note">Cierre diario en ${ix.currency}; modelos y rentabilidad exigida a 12 meses.</p><div class="chart"><canvas id="c_ix_${esc(ix.name)}" role="img" aria-label="${esc(ix.name)}"></canvas></div></div>`;
 const delta = v => `<span class="${v >= 0 ? 'up' : 'down'}">${v >= 0 ? '▲' : '▼'} ${Math.abs(v * 100).toFixed(1)}%</span>`;
 function spark(pts) {
   const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]), x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
@@ -716,7 +737,7 @@ const tiles = list => '<div class="tiles">' + list.map((k, i) => `<div class="ti
   `<div class="v" data-count="${esc(k.value)}">${esc(k.value)}</div><div class="s">${esc(k.sub)}</div>${status(k.tone)}</div>`).join('') + '</div>';
 const card = (key, title, note, legend = true) => `<div class="card"><h3>${title}</h3>${note ? `<p class="note">${note}</p>` : ''}` +
   `<div class="chart"><canvas id="c_${key}" role="img" aria-label="${esc(title)}"></canvas></div>` +
-  (legend && D.specs[key] && D.specs[key].series.length > 1 ? `<div class="legend">${D.specs[key].series.map(x => `<span>${line(x.color, x.dash)}${esc(x.label)}</span>`).join('')}</div>` : '') + '</div>';
+  (legend && D.specs[key] && D.specs[key].series.length > 1 ? `<div class="legend">${D.specs[key].series.map(x => `<span>${x.dots ? `<svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4" fill="${SLOT(x.color)}"/></svg>` : line(x.color, x.dash)}${esc(x.label)}</span>`).join('')}</div>` : '') + '</div>';
 const SLOT = k => k === 'muted' ? 'rgba(195,194,183,.55)' : C[k];
 const line = (k, dash = []) => `<svg width="22" height="6" aria-hidden="true"><line x1="1" y1="3" x2="21" y2="3" stroke="${SLOT(k)}" stroke-width="2" stroke-linecap="round" stroke-dasharray="${(dash || []).join(' ')}"/></svg>`;
 const sec = (id, title, sub, body) => `<section id="${id}" class="tab" hidden><div class="sec-head"><h2 class="sec">${title}</h2><span class="sub">${sub}</span></div>${body}</section>`;
@@ -745,9 +766,8 @@ html += sec('curvas', 'Curvas y tasas', 'Curvas nominales y reales, pendiente, r
 html += sec('mercados', 'Mercados', 'Índices y lo que les dice la macro',
   `<div class="ixgrid">${MK.indices.concat([MK.ipc_usd]).map(ixCard).join('')}</div>
   <div class="split">${why('Qué dicen los mercados', D.reasons['Mercados'])}<div class="charts">
-  <div class="card"><h3>S&amp;P 500</h3><p class="note">Mensual, con modelos y la rentabilidad que exige nuestro costo de capital.</p><div class="chart"><canvas id="c_ix_S&amp;P 500" role="img" aria-label="S&amp;P 500"></canvas></div></div>
-  <div class="card"><h3>IPC México</h3><p class="note">Mensual, en pesos, al costo de capital de México.</p><div class="chart"><canvas id="c_ix_IPC México" role="img" aria-label="IPC México"></canvas></div></div>
-  </div></div>`);
+  ${MK.indices.slice(0, 2).map(ixChart).join('')}</div></div>
+  <div class="charts" style="margin-top:14px">${MK.indices.slice(2).map(ixChart).join('')}</div>`);
 
 // Trade and public finances
 const EC = D.economy;
@@ -807,7 +827,8 @@ const tip = document.getElementById('tip');
 function external({chart, tooltip}) {
   if (!tooltip.opacity || !tooltip.dataPoints?.length) { tip.style.opacity = 0; return; }
   const c = chart.$meta, pts = tooltip.dataPoints.filter(p => !p.dataset.label.startsWith('_'));
-  const date = c.bar ? tooltip.title[0] : c.curve ? 'Plazo ' + +pts[0].parsed.x.toFixed(2) + ' años' : new Date(pts[0].parsed.x).toISOString().slice(0, 7);
+  const date = c.bar ? tooltip.title[0] : c.curve ? 'Plazo ' + (pts.find(p => p.raw.t)?.raw.t || +pts[0].parsed.x.toFixed(2) + ' años')
+    : new Date(pts[0].parsed.x).toISOString().slice(0, c.daily ? 10 : 7);
   tip.innerHTML = `<div class="d">${esc(date)}</div>` + pts.map(p => `<div class="r"><span class="sw" style="background:${p.dataset.borderColor || p.dataset.backgroundColor}"></span>${esc(p.dataset.label === 'Histórico' ? c.title : p.dataset.label)}<b>${c.fmt ? c.fmt(p.parsed.y) : num(p.parsed.y, c.unit)}</b></div>`).join('');
   const r = chart.canvas.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
   let x = r.left + tooltip.caretX + 14, y = r.top + tooltip.caretY - h / 2;
@@ -843,11 +864,13 @@ function specChart(key) {
   else Object.assign(o.scales.x, {min: Math.min(...xs), max: Math.max(...xs)});
   const ref = sp.ref == null ? [] : [{id: 'ref', afterDraw(c) { const y = c.scales.y.getPixelForValue(sp.ref), {left, right} = c.chartArea, g = c.ctx;
     g.save(); g.setLineDash([4, 4]); g.strokeStyle = C.axis; g.beginPath(); g.moveTo(left, y); g.lineTo(right, y); g.stroke(); g.restore(); }}];
-  const ch = new Chart(el, {type: 'line', plugins: [crosshair, ...ref], options: o, data: {datasets: sp.series.map((x, i) => ({
-    label: x.label, borderColor: SLOT(x.color), backgroundColor: SLOT(x.color), borderWidth: 2, borderDash: x.dash || [], tension: 0,
-    pointRadius: sp.kind === 'tenor' && i === 0 ? 3 : 0, pointHoverRadius: 4, pointBorderColor: C.card, pointHoverBorderColor: C.card, pointHoverBorderWidth: 2,
-    data: x.points.map(([a, b]) => ({x: a, y: b}))}))}});
-  ch.$meta = {unit: sp.unit, title: sp.series[0].label, curve: sp.kind === 'tenor', fmt};
+  const ch = new Chart(el, {type: 'line', plugins: [crosshair, ...ref], options: o, data: {datasets: sp.series.map(x => ({
+    label: x.label, borderColor: SLOT(x.color), backgroundColor: SLOT(x.color), borderWidth: 2, borderDash: x.dash || [], tension: x.dots ? 0 : 0.3,
+    showLine: !x.dots, pointRadius: x.dots ? 3.5 : 0, pointHoverRadius: 5, pointBorderColor: C.card, pointBorderWidth: x.dots ? 1.5 : 0,
+    pointHoverBorderColor: C.card, pointHoverBorderWidth: 2,
+    data: x.points.map(([a, b], i) => ({x: a, y: b, t: x.tenors ? x.tenors[i] : null}))}))}});
+  ch.$meta = {unit: sp.unit, title: sp.series[0].label, curve: sp.kind === 'tenor', fmt, daily: !!sp.daily};
+  if (sp.kind === 'time') track(ch, xs, Math.max(...xs), !!sp.daily);
 }
 
 function makeChart(key) {
@@ -875,7 +898,9 @@ function makeChart(key) {
   const xs = c.lines.flatMap(l => l.points.map(p => p[0])), opts = base({unit: c.unit});
   Object.assign(opts.scales.x, {min: Math.min(...xs), max: Math.max(...xs)});
   const ch = new Chart(document.getElementById('c_' + key), {type: 'line', data: {datasets}, plugins: [crosshair], options: opts});
-  ch.$meta = {unit: c.unit, title: c.title};
+  ch.$meta = {unit: c.unit, title: c.title, daily: c.daily};
+  const hist = c.lines.find(l => l.role === 'hist').points;
+  track(ch, xs, hist[hist.length - 1][0], c.daily);
 }
 
 function base({bar, unit}) {
@@ -883,16 +908,51 @@ function base({bar, unit}) {
   return {
     maintainAspectRatio: false, animation: false, normalized: true,
     interaction: bar ? {mode: 'index', intersect: false} : {mode: 'nearest', axis: 'x', intersect: false},
-    layout: {padding: {top: 4, right: 4}},
+    layout: {padding: {top: 4, right: 14}},
     scales: {
       x: bar ? {grid: {display: false}, border: {color: C.axis}, ticks: {...tick, autoSkip: false, maxRotation: 90, minRotation: 0}}
-             : {type: 'linear', grid: {display: false}, border: {color: C.axis}, ticks: {...tick, maxTicksLimit: 6, callback: v => new Date(v).getFullYear()}},
+             : {type: 'linear', grid: {display: false}, border: {color: C.axis}, ticks: {...tick, maxTicksLimit: 6, callback(v) {
+               const d = new Date(v), span = this.max - this.min;  // label by the window shown, not by the data
+               return span < 120 * 864e5 ? d.toLocaleDateString('es-MX', {day: 'numeric', month: 'short', timeZone: 'UTC'})
+                 : span < 800 * 864e5 ? d.toLocaleDateString('es-MX', {month: 'short', year: '2-digit', timeZone: 'UTC'}) : d.getUTCFullYear(); }}},
       y: {grid: {color: C.grid, drawTicks: false}, border: {display: false}, ticks: {...tick, padding: 8, maxTicksLimit: 5,
         callback: v => unit === '%' ? +v.toFixed(1) + '%' : v >= 1000 ? (v / 1000).toLocaleString('es-MX', {maximumFractionDigits: 1}) + 'k' : +v.toFixed(1)}},
     },
     plugins: {legend: {display: false}, tooltip: {enabled: false, external, filter: i => !i.dataset.label.startsWith('_')}},
   };
 }
+
+// Period selector: one window for every time chart. "Auto" = last year for daily charts, everything for monthly ones.
+// The forecast stays visible but never takes more room than the history shown.
+let range = 'auto';
+const timed = [];
+const MONTH = 30.44 * 864e5;
+function windowFor(r, last, xmin, xmax, daily) {
+  const k = r === 'auto' ? (daily ? '1y' : 'all') : r;
+  if (k === 'all') return [xmin, xmax];
+  const lo = k === 'ytd' ? Date.UTC(new Date(last).getUTCFullYear(), 0, 1) : last - {'1m': 1, '3m': 3, '6m': 6, '1y': 12, '5y': 60}[k] * MONTH;
+  return [Math.max(lo, xmin), Math.min(xmax, last + Math.max(last - lo, MONTH))];
+}
+function applyRange(t) {
+  const [lo, hi] = windowFor(range, t.last, t.xmin, t.xmax, t.daily), ys = [];
+  t.chart.data.datasets.forEach(d => d.data.forEach(p => { if (p.x >= lo && p.x <= hi && p.y != null) ys.push(p.y); }));
+  const ymin = Math.min(...ys), ymax = Math.max(...ys);
+  // Round the y bounds to a 1-2-5 step so the end ticks read as round numbers.
+  const raw = (ymax - ymin) / 4 || Math.abs(ymax) * 0.05 || 1, mag = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map(f => f * mag).find(x => x >= raw);
+  Object.assign(t.chart.options.scales.x, {min: lo, max: hi});
+  Object.assign(t.chart.options.scales.y, {min: Math.floor(ymin / step) * step, max: Math.ceil(ymax / step) * step});
+  t.chart.update('none');
+}
+function track(chart, xs, last, daily) {
+  const t = {chart, last, daily, xmin: Math.min(...xs), xmax: Math.max(...xs)};
+  timed.push(t); applyRange(t);
+}
+document.querySelectorAll('.ranges button').forEach(b => b.addEventListener('click', () => {
+  range = b.dataset.r;
+  document.querySelectorAll('.ranges button').forEach(x => x.classList.toggle('on', x === b));
+  timed.forEach(applyRange);
+}));
 
 // Tabs: one section at a time, routed on the hash; a tab's charts and counters are built the first time it is shown.
 const built = new Set();
@@ -903,11 +963,11 @@ function show(id) {
   tabs.forEach(t => { t.hidden = t !== tab; });
   links.forEach(a => { const on = a.getAttribute('href') === '#' + tab.id; a.classList.toggle('on', on); a.setAttribute('aria-selected', on); });
   if (built.has(tab.id)) return; built.add(tab.id);
-  requestAnimationFrame(() => {
+  setTimeout(() => {  // after the tab is laid out; a timer, not rAF, so a background tab still builds
     tab.querySelectorAll('.chart').forEach(el => { if (window.Chart) { el.classList.add('draw'); makeChart(el.querySelector('canvas').id.slice(2)); } });
     tab.querySelectorAll('[data-count]').forEach(countUp);
     tab.querySelectorAll('.range').forEach(el => el.classList.add('grow'));
-  });
+  }, 0);
 }
 links.forEach(a => a.addEventListener('click', ev => { ev.preventDefault(); const id = a.getAttribute('href').slice(1);
   history.replaceState(null, '', '#' + id); show(id); scrollTo({top: 0}); a.scrollIntoView({block: 'nearest', inline: 'center'}); }));
