@@ -53,7 +53,7 @@ def build_dashboard(as_of: str, erp: float = DEFAULT_ERP, fetch: sources.Fetch =
         imf_g = _imf_points(weo["NGDP_RPCH"], iso, year)
         imf_i = _imf_points(weo["PCPIPCH"], iso, year)
         be = _recent(_monthly(d["breakeven_10y"])) if "breakeven_10y" in d else None
-        add(f"{c}_infl", f"Inflación {name}", "%", _recent(_monthly(d["cpi"]).pct_change(12) * 100), MAGENTA,
+        add(f"{c}_infl", f"Inflación {name}", "%", _recent(_yoy_pct(_monthly(d["cpi"]))), MAGENTA,
             imf=imf_i, extra=[("Inflación esperada 10a (mercado)", be, YELLOW)] if be is not None else (),
             market=float(be.iloc[-1]) if be is not None else None)
         extra = [("Bono 10 años", _recent(_monthly(d["rate_10y"])), VIOLET)]
@@ -63,7 +63,7 @@ def build_dashboard(as_of: str, erp: float = DEFAULT_ERP, fetch: sources.Fetch =
             market=float(d["rate_10y"].iloc[-1]))
         add(f"{c}_unemp", f"Desempleo {name}", "%", _recent(_monthly(d["unemployment"])), LIME)
         gdp = d["gdp"].resample("QS").last().dropna()
-        add(f"{c}_gdp", f"PIB real anual {name}", "%", _recent(gdp.pct_change(4) * 100), ORANGE, "QS", imf=imf_g)
+        add(f"{c}_gdp", f"PIB real anual {name}", "%", _recent(_yoy_pct(gdp)), ORANGE, "QS", imf=imf_g)
     add("MX_fx", "Pesos por dólar", "", _recent(_monthly(s["MX"]["fx_usd"])), YELLOW)
     g = s["GLOBAL"]
     add("brent", "Petróleo Brent (USD/barril)", "", _recent(_monthly(g["brent"])), ORANGE)
@@ -243,6 +243,11 @@ def _imf_points(df: pd.DataFrame, iso: str, year: int) -> pd.Series:
         return pd.Series(dtype=float)
     vals = df.loc[year:year + 2, iso].dropna()
     return pd.Series(vals.values, index=[pd.Timestamp(y, 7, 1) for y in vals.index])
+
+
+def _yoy_pct(series: pd.Series) -> pd.Series:
+    """% change vs the same date a year earlier; by date, not position, so a missing print (FRED has no Oct 2025 CPI) leaves a gap instead of a 13-month change."""
+    return (series / series.shift(freq=pd.DateOffset(years=1)) - 1) * 100
 
 
 def _recent(series: pd.Series) -> pd.Series:

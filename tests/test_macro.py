@@ -140,3 +140,12 @@ def test_dashboard_page():
     assert {"US_infl", "MX_fx", "brent", "vix"} <= data["charts"].keys()
     assert all(f["ensemble"] is not None for f in data["forecasts"])
     assert "Régimen" in data["reasons"]["México"][0]
+
+
+def test_yoy_pct_skips_missing_month():
+    from macro.dashboard import _yoy_pct
+    idx = pd.date_range("2024-01-01", "2025-12-01", freq="MS").drop(pd.Timestamp("2024-10-01"))
+    s = pd.Series(range(100, 100 + len(idx)), index=idx, dtype=float)
+    yoy = _yoy_pct(s).dropna()
+    assert pd.Timestamp("2025-10-01") not in yoy.index
+    assert yoy[pd.Timestamp("2025-11-01")] == (s["2025-11-01"] / s["2024-11-01"] - 1) * 100
