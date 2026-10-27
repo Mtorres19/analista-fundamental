@@ -59,8 +59,7 @@ def build_dashboard(as_of: str, erp: float = DEFAULT_ERP, fetch: sources.Fetch =
         extra = [("Bono 10 años", _recent(_monthly(d["rate_10y"])), VIOLET)]
         if c == "MX":
             extra.append(("Tasa Fed (EE.UU.)", _recent(_monthly(s["US"]["policy_rate"])), WHITE))
-        add(f"{c}_rate", f"Tasa de política {name}", "%", _recent(_monthly(d["policy_rate"])), CYAN, extra=extra,
-            market=float(d["rate_10y"].iloc[-1]))
+        add(f"{c}_rate", f"Tasa de política {name}", "%", _recent(_monthly(d["policy_rate"])), CYAN, extra=extra)
         add(f"{c}_unemp", f"Desempleo {name}", "%", _recent(_monthly(d["unemployment"])), LIME)
         gdp = d["gdp"].resample("QS").last().dropna()
         add(f"{c}_gdp", f"PIB real anual {name}", "%", _recent(_yoy_pct(gdp)), ORANGE, "QS", imf=imf_g)
@@ -228,7 +227,7 @@ def _chart(title, unit, hist, fc, color, imf, extra) -> dict:
         {"label": "_lo", "color": color, "points": _pts(fc["lo"]), "width": 0},
         {"label": "Banda 90% (AR)", "color": color, "points": _pts(fc["hi"]), "width": 0, "fill": True},
         {"label": "Reversión a la media (AR)", "color": color, "points": _pts(fc["ar1"]), "dash": [6, 4]},
-        {"label": "Tendencia reciente", "color": ORANGE if color != ORANGE else YELLOW,
+        {"label": "Tendencia (amortiguada)", "color": ORANGE if color != ORANGE else YELLOW,
          "points": _pts(fc["drift"]), "dash": [2, 3]},
         {"label": "Promedio de modelos", "color": WHITE, "points": _pts(fc["ensemble"]), "dash": [10, 4]},
     ]
@@ -362,7 +361,7 @@ html += `<section id="pronosticos"><h2>Pronósticos</h2><div class="card table-w
   <td>${esc(f.name)}</td><td>${f.horizon}</td><td>${num(f.now, f.unit)}</td><td>${num(f.drift, f.unit)}</td>
   <td>${num(f.ar1, f.unit)}</td><td>${num(f.lo, f.unit)} a ${num(f.hi, f.unit)}</td><td><b>${num(f.ensemble, f.unit)}</b></td>
   <td>${num(f.imf, f.unit)}</td><td>${num(f.market, f.unit)}</td></tr>`).join('') + `</tbody></table>
-  <p class="note"><b>Tendencia</b>: si sigue el ritmo del último año. <b>Reversión (AR)</b>: modelo autorregresivo ajustado a 10 años; la serie regresa a su promedio de largo plazo, con banda de 90%. <b>Promedio</b>: de ambos modelos. <b>FMI</b>: último año proyectado (promedio anual). <b>Mercado</b>: inflación esperada a 10 años (breakeven) o bono a 10 años para tasas. Son referencias, no certezas.</p></div></section>`;
+  <p class="note"><b>Tendencia</b>: el ritmo del último año, amortiguado para no proyectar un choque para siempre. <b>Reversión (AR)</b>: modelo autorregresivo ajustado a 10 años; la serie regresa a su promedio de largo plazo, con banda de 90% (robusta a choques como 2020). <b>Promedio</b>: de ambos modelos. <b>FMI</b>: último año proyectado (promedio anual). <b>Mercado</b>: inflación esperada a 10 años (breakeven), solo EE.UU. Son referencias, no certezas.</p></div></section>`;
 html += `<section id="supuestos"><h2>Supuestos de valuación</h2><div class="card table-wrap"><table><thead><tr>
   <th>Mercado</th><th>Libre de riesgo (USD)</th><th>Prima de mercado</th><th>Riesgo país</th><th>Inflación esperada</th>
   <th>Crec. terminal</th><th>Costo de capital (beta 1)</th></tr></thead><tbody>` + D.assumptions.map(a => `<tr>

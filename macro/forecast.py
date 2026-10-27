@@ -1,8 +1,9 @@
 """Simple, transparent forecasts: several methods side by side, none of them trusted alone.
 
-- drift: the last value plus the average monthly change of the past year ("if the recent trend continues").
+- drift: the last value plus the average change of the past year, damped (phi 0.8 per period) so a price
+  shock is not projected forever: at most ~4 periods of the recent pace get added.
 - ar1: x_t = a + b x_{t-1} fitted on the last 10 years: the series drifts back to its own long-run mean.
-  Comes with a 90% band from the fit's residuals.
+  Comes with a 90% band from the residuals' median absolute deviation, so one shock (2020) does not blow it up.
 - ensemble: the average of drift and ar1.
 External views (IMF WEO, market breakevens) are added next to these by the dashboard, not mixed in.
 """
@@ -11,6 +12,8 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
+DAMPING = 0.8
 
 
 def forecast(series: pd.Series, horizon: int, freq: str = "MS", fit_years: int = 10) -> pd.DataFrame:
@@ -22,14 +25,15 @@ def forecast(series: pd.Series, horizon: int, freq: str = "MS", fit_years: int =
     steps = np.arange(1, horizon + 1)
     per_year = {"MS": 12, "QS": 4}[freq]
     recent = s.iloc[-(per_year + 1):]
-    drift = s.iloc[-1] + steps * recent.diff().mean()
+    drift = s.iloc[-1] + np.cumsum(DAMPING ** steps) * recent.diff().mean()
 
     x0, x1 = s.values[:-1], s.values[1:]
     var = np.var(x0)
     # OLS slope; a flat series has none. shortcut: a unit-root fit would never revert, so cap it instead of testing.
     b = 0.0 if var < 1e-12 else min(float(np.cov(x0, x1, bias=True)[0, 1] / var), 0.99)
     a = float(np.mean(x1 - b * x0))
-    sigma = float(np.std(x1 - (a + b * x0), ddof=2))
+    resid = x1 - (a + b * x0)
+    sigma = 1.4826 * float(np.median(np.abs(resid - np.median(resid))))
     ar, x = [], float(s.iloc[-1])
     for _ in steps:
         x = a + b * x
