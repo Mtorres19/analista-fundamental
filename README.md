@@ -23,6 +23,7 @@ pip install -e ".[dev]"
 export BANXICO_TOKEN=...   # gratis: https://www.banxico.org.mx/SieAPIRest/service/v1/token
 python -m macro check                       # prueba que cada serie responda
 python -m macro report                      # panorama de hoy
+python -m macro dashboard                   # página con gráficas, razones y pronósticos (reportes/dashboard.html)
 python -m macro report --date 2025-12-31 --erp 0.055 --out reportes/2025-12.md
 pytest
 ```

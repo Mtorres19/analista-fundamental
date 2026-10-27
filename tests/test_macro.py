@@ -116,3 +116,27 @@ def test_parsers():
     assert df.loc[2026, "MEX"] == 1.2 and pd.isna(df.loc[2025, "USA"])
     with pytest.raises(sources.DataError):
         sources.parse_imf({}, "NGDP_RPCH")
+
+
+def test_forecast_reverts_to_mean():
+    from macro.forecast import forecast
+    # Oscillating around 5 and currently far above it: AR pulls back down, the band brackets it.
+    idx = pd.date_range("2016-01-01", periods=120, freq="MS")
+    s = pd.Series([5 + 3 * (0.8 ** (i % 24)) * (-1) ** (i // 24) for i in range(120)], index=idx)
+    s.iloc[-1] = 9.0
+    fc = forecast(s, 12)
+    assert len(fc) == 12 and fc.index[0] == pd.Timestamp("2026-01-01")
+    assert fc["ar1"].iloc[-1] < 9.0
+    assert (fc["lo"] <= fc["ar1"]).all() and (fc["ar1"] <= fc["hi"]).all()
+
+
+def test_dashboard_page():
+    import json
+
+    from macro.dashboard import build_dashboard
+    page = build_dashboard("2026-06-30", fetch=fake_fetch, weo_fetch=fake_weo)
+    data = json.loads(page.split('type="application/json">')[1].split("</script>")[0])
+    assert {"Mundo", "EE.UU.", "México", "Supuestos"} <= data["reasons"].keys()
+    assert {"US_infl", "MX_fx", "brent", "vix"} <= data["charts"].keys()
+    assert all(f["ensemble"] is not None for f in data["forecasts"])
+    assert "Régimen" in data["reasons"]["México"][0]
