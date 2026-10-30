@@ -61,6 +61,10 @@ def fake_fetch(source: str, sid: str) -> pd.Series:
     return pd.Series([base * (1 + GROWING[sid]) ** (i / per_year) for i in range(len(idx))], index=idx)
 
 
+def no_options(ticker, target_days=30):
+    raise sources.DataError("no option chains in tests")
+
+
 def fake_weo(indicator: str) -> pd.DataFrame:
     years = range(2020, 2032)
     if indicator == "NGDP_RPCH":
@@ -189,7 +193,7 @@ def test_dashboard_page():
     import json
 
     from macro.dashboard import build_dashboard
-    page = build_dashboard("2026-06-30", fetch=fake_fetch, weo_fetch=fake_weo)
+    page = build_dashboard("2026-06-30", fetch=fake_fetch, weo_fetch=fake_weo, options=no_options)
     data = json.loads(page.split('type="application/json">')[1].split("</script>")[0])
     assert {"Mundo", "EE.UU.", "México", "Supuestos"} <= data["reasons"].keys()
     assert {"US_infl", "MX_fx", "brent", "vix"} <= data["charts"].keys()
@@ -300,3 +304,30 @@ def test_mexico_curve_from_price_vector(report):
     assert m.mx_curve.at("10y") == pytest.approx(9.0, abs=1e-4)          # par bond yields its coupon
     assert m.mx_real_curve.at("10y") == pytest.approx(4.2, abs=1e-4)     # Udibono price / UDI value
     assert m.mx_curve.years_by["now"][m.mx_curve.tenors.index("30y")] == pytest.approx(182 * 56 / 365, abs=1e-3)
+
+
+def test_fedwatch_hike_mid_month():
+    from macro.policy import fedwatch, step_distribution
+    # Meeting on 15-Dec: Dec averages 15 days at 4.00 and 16 at 4.25; January (no meeting) shows 4.25.
+    dec = (15 * 4.00 + 16 * 4.25) / 31
+    avg = pd.Series([4.00, dec, 4.25], index=pd.to_datetime(["2026-11-01", "2026-12-01", "2027-01-01"]))
+    path = fedwatch(avg, [pd.Timestamp("2026-12-15")], current=4.00)
+    assert path[0]["before"] == pytest.approx(4.00) and path[0]["after"] == pytest.approx(4.25)
+    row = step_distribution(path, 4.00)[0]
+    assert row["p_hike"] == pytest.approx(1.0) and row["cum"][1] == pytest.approx(1.0)
+    # Half a hike priced: 50/50 between hold and +25, and the steps compound across two meetings.
+    half = step_distribution([{"date": 1, "before": 4.0, "after": 4.125}, {"date": 2, "before": 4.125, "after": 4.25}], 4.0)
+    assert half[0]["p_hike"] == pytest.approx(0.5) and half[1]["cum"][0] == pytest.approx(0.25)
+    assert half[1]["cum"][1] == pytest.approx(0.5) and half[1]["cum"][2] == pytest.approx(0.25)
+    # Without a clean month after the meeting, the post-meeting rate comes from the meeting month's average.
+    solo = fedwatch(avg.iloc[:2], [pd.Timestamp("2026-12-15")], current=4.00)
+    assert solo[0]["after"] == pytest.approx(4.25)
+
+
+def test_cetes_forwards_and_buckets():
+    from macro.policy import cetes_forwards, normal_buckets
+    f = cetes_forwards({28: 7.0, 91: 7.0})
+    g1, g2 = 1 + 0.07 * 28 / 360, 1 + 0.07 * 91 / 360
+    assert f[0] == (0, 28, 7.0) and f[1][2] == pytest.approx((g2 / g1 - 1) * 360 / 63 * 100)   # simple yields: forward a bit lower
+    b = normal_buckets(4.0, 0.25, 4.0)
+    assert sum(b.values()) == pytest.approx(1.0) and b[1] == pytest.approx(b[-1]) and b[0] > b[1]

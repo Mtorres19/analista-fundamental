@@ -122,7 +122,10 @@ SERIES: dict[str, dict[str, tuple[str, str, int]]] = {
     # Futures curves: price by contract month (index = delivery month, not a quote date), so they are fetched
     # directly, never through load(). Fed funds: rate = 100 - price.
     "FUTURES": {"fed_funds": ("yahoo_curve", "ZQ.CBT", 0), "brent": ("yahoo_curve", "BZ.NYM", 0),
-                "copper": ("yahoo_curve", "HG.CMX", 0)},
+                "copper": ("yahoo_curve", "HG.CMX", 0), "sofr_3m": ("yahoo_curve", "SR3.CME", 0)},
+    # Implied volatility indices, daily: Treasury options (ICE BofA MOVE) and the VIX term structure.
+    "VOL": {"move": ("yahoo", "^MOVE", 1), "vix9d": ("yahoo", "^VIX9D", 1), "vix": ("yahoo", "^VIX", 1),
+            "vix3m": ("yahoo", "^VIX3M", 1), "vix6m": ("yahoo", "^VIX6M", 1)},
 }
 
 # IMF World Economic Outlook: real GDP growth and average CPI inflation, % per year.
@@ -286,9 +289,28 @@ def _yahoo_curve(root: str) -> pd.Series:
         raise DataError(f"Yahoo futures {root}: {exc}") from exc
     last = df.ffill().iloc[-1].dropna() if df is not None and not df.empty else pd.Series(dtype=float)
     out = pd.Series({tickers[t]: float(v) for t, v in last.items() if t in tickers}).sort_index()
-    if len(out) < 6:
+    if len(out) < 4:   # SOFR futures list only quarterly months this far out
         raise DataError(f"Yahoo futures {root}: only {len(out)} contracts quoted")
     return out
+
+
+def option_chain(ticker: str, target_days: int = 30) -> tuple[dict, float, int]:
+    """Calls and puts (DataFrames) of the expiry closest to *target_days*, the spot price and the days to expiry."""
+    import warnings
+
+    import yfinance as yf
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tk = yf.Ticker(ticker)
+            today = pd.Timestamp.today().normalize()
+            expiry = min(tk.options, key=lambda e: abs((pd.Timestamp(e) - today).days - target_days))
+            chain = tk.option_chain(expiry)
+            spot = float(tk.history(period="5d")["Close"].dropna().iloc[-1])
+    except Exception as exc:
+        raise DataError(f"Yahoo options {ticker}: {exc}") from exc
+    return {"calls": chain.calls, "puts": chain.puts}, spot, max(1, (pd.Timestamp(expiry) - today).days)
 
 
 def _get(url: str, **kwargs) -> requests.Response:
