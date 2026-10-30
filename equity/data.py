@@ -7,6 +7,7 @@ Amounts in the company's reporting currency, units as reported (USD, not million
 
 from __future__ import annotations
 
+import numbers
 import os
 import warnings
 
@@ -275,7 +276,7 @@ def consensus(ticker: str) -> Consensus | None:
             rec, rev = tk.recommendations_summary, tk.revenue_estimate
     except Exception:   # a missing consensus must not stop the valuation
         return None
-    num = lambda v: float(v) if isinstance(v, (int, float)) and v == v else None
+    num = lambda v: float(v) if isinstance(v, numbers.Real) and v == v else None   # yfinance gives numpy ints
     ratings = ({k: int(rec.iloc[0][k]) for k in ("strongBuy", "buy", "hold", "sell", "strongSell") if k in rec.columns}
                if rec is not None and not rec.empty else {})
     revenue = {}
