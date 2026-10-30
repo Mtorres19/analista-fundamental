@@ -37,7 +37,10 @@ FLOWS = {
 }
 STOCKS = {
     "cash": ["CashCashEquivalentsAndShortTermInvestments", "CashAndCashEquivalentsAtCarryingValue"],
-    "debt": ["LongTermDebt", "LongTermDebtNoncurrent", "DebtInstrumentCarryingAmount"],
+    # shortcut: debt + debt_current double-counts the current part when a company only tags LongTermDebt (which already
+    # includes it); small for most issuers, upgrade by reading LongTermDebt alone when Noncurrent is missing.
+    "debt": ["LongTermDebtNoncurrent", "LongTermDebt", "DebtInstrumentCarryingAmount"],
+    "debt_current": ["LongTermDebtCurrent", "DebtCurrent"],
     "equity": ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
 }
 
@@ -75,6 +78,8 @@ def sec_financials(ticker: str, years: int = 6) -> Financials:
             if got:
                 ttm[k], end = got
                 ttm_end = max(ttm_end or end, end)
+                if k == "revenue" and (pair := ytd_pair(_units(gaap, tag), ends[-1])):
+                    ttm["revenue_ytd_growth"] = float(pair[0]["val"]) / float(pair[1]["val"]) - 1
                 break
     return Financials(ticker=ticker.upper(), name=facts.get("entityName", ticker), currency="USD",
                       fiscal_years=[e.date().isoformat() for e in ends],
@@ -85,25 +90,31 @@ def sec_financials(ticker: str, years: int = 6) -> Financials:
 def latest_facts(units: list[dict], fy_end: pd.Timestamp, flow: bool) -> tuple[float, str] | None:
     """Value after the last fiscal year from 10-Qs: for a flow, trailing twelve months = last fiscal year + this
     year-to-date - the same span a year earlier; for a stock, the latest quarter-end balance. None if no 10-Q since."""
-    q = [f for f in units if f.get("form") in ("10-Q", "10-Q/A") and "end" in f and pd.Timestamp(f["end"]) > fy_end]
     if not flow:
+        q = [f for f in units if f.get("form") in ("10-Q", "10-Q/A") and "end" in f and pd.Timestamp(f["end"]) > fy_end]
         if not q:
             return None
         f = max(q, key=lambda f: (f["end"], f.get("filed", "")))
         return float(f["val"]), f["end"]
+    pair, fy = ytd_pair(units, fy_end), annual_facts(units, flow=True)
+    if pair is None or fy_end not in fy.index:
+        return None
+    now, before = pair
+    return float(fy[fy_end]) + float(now["val"]) - float(before["val"]), now["end"]
+
+
+def ytd_pair(units: list[dict], fy_end: pd.Timestamp) -> tuple[dict, dict] | None:
+    """This fiscal year's latest year-to-date 10-Q fact and the same span a year earlier."""
     days = lambda f: (pd.Timestamp(f["end"]) - pd.Timestamp(f["start"])).days
-    ytd = [f for f in q if "start" in f and abs((pd.Timestamp(f["start"]) - fy_end).days - 1) <= 3]
-    fy = annual_facts(units, flow=True)
-    if not ytd or fy_end not in fy.index:
+    ytd = [f for f in units if f.get("form") in ("10-Q", "10-Q/A") and "start" in f and "end" in f
+           and pd.Timestamp(f["end"]) > fy_end and abs((pd.Timestamp(f["start"]) - fy_end).days - 1) <= 3]
+    if not ytd:
         return None
     now = max(ytd, key=lambda f: (f["end"], f.get("filed", "")))
     year_ago = pd.Timestamp(now["end"]) - pd.DateOffset(years=1)
     prior = [f for f in units if "start" in f and abs((pd.Timestamp(f["end"]) - year_ago).days) <= 7
              and abs(days(f) - days(now)) <= 7]
-    if not prior:
-        return None
-    before = max(prior, key=lambda f: f.get("filed", ""))
-    return float(fy[fy_end]) + float(now["val"]) - float(before["val"]), now["end"]
+    return (now, max(prior, key=lambda f: f.get("filed", ""))) if prior else None
 
 
 def annual_facts(units: list[dict], flow: bool) -> pd.Series:

@@ -61,7 +61,7 @@ def render(v: Valuation, a: MarketAssumptions) -> str:
         "## Tesis", "", *[f"{i}. {t}" for i, t in enumerate(thesis(v), 1)], "",
         "## Valuación", "",
         "| Supuesto | Valor |", "| --- | --- |",
-        f"| Crecimiento años 1-5 | {_p(x.growth)} |", f"| Crecimiento terminal | {_p(x.terminal_growth)} |",
+        f"| Crecimiento años 1-5 (promedio de 3 años y del año en curso) | {_p(x.growth)} |", f"| Crecimiento terminal | {_p(x.terminal_growth)} |",
         f"| Margen operativo | {_p(x.margin)} |", f"| Impuesto efectivo → marginal | {_p(x.tax_effective)} → {_p(x.tax_marginal)} |",
         f"| Ventas por unidad de capital | {x.sales_to_capital:.2f} |", f"| ROIC terminal | {_p(x.terminal_roic)} |",
         f"| Beta | {x.beta:.2f} |", f"| Costo de capital accionario | {_p(x.cost_of_equity)} |",

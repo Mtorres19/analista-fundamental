@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import statistics
 
+import pandas as pd
+
 from pydantic import BaseModel
 
 from equity.data import Financials, Market
@@ -107,8 +109,12 @@ def value(f: Financials, m: Market, a: MarketAssumptions, as_of: str, peers: dic
 def inputs(f: Financials, m: Market, a: MarketAssumptions, **overrides: float) -> Inputs:
     rev = f.items["revenue"]
     n = min(3, len(rev) - 1)
-    growth = _clip((rev[-1] / rev[-1 - n]) ** (1 / n) - 1, *GROWTH_CAP)
+    # Recent momentum counts as much as the 3-year trend: half each when 10-Qs give this year's growth.
+    yoy = f.ttm.get("revenue_ytd_growth")
+    growth = _clip(revenue_cagr(f) if yoy is None else (revenue_cagr(f) + yoy) / 2, *GROWTH_CAP)
     margins = [e / r for e, r in zip(f.items["ebit"][-3:], rev[-3:]) if e is not None and r]
+    if "revenue" in f.ttm and "ebit" in f.ttm:   # the latest twelve months replace the oldest of the three years
+        margins = margins[1:] + [f.ttm["ebit"] / f.ttm["revenue"]]
     taxes = [t / p for t, p in zip(f.items["tax"][-3:], f.items["pretax"][-3:]) if t is not None and p and p > 0]
     marginal = MARGINAL_TAX.get(f.currency, 0.25)
 
@@ -116,7 +122,7 @@ def inputs(f: Financials, m: Market, a: MarketAssumptions, **overrides: float) -
     net_capex = sum(c - d for c, d in zip(f.items["capex"][-n:], f.items["da"][-n:]) if c is not None and d is not None)
     stc = _clip(d_rev / net_capex, *SALES_TO_CAPITAL_CAP) if net_capex > 0 and d_rev > 0 else 2.0
 
-    debt = f.ttm.get("debt", (f.last("debt") or [0.0])[0])
+    debt = sum(f.ttm.get(k, (f.last(k) or [0.0])[0]) for k in ("debt", "debt_current"))
     cash = f.ttm.get("cash", (f.last("cash") or [0.0])[0])
     ebit, interest = (f.last("ebit") or [0.0])[0], (f.last("interest") or [0.0])[0]
     spread = default_spread(ebit / interest if interest else float("inf"))
@@ -174,16 +180,25 @@ def comparables(f: Financials, x: Inputs, peers: dict[str, dict[str, float | Non
     return out
 
 
+def revenue_cagr(f: Financials) -> float:
+    """Revenue growth over about three years, ending at the trailing twelve months when there are any."""
+    rev = f.items["revenue"]
+    n = min(3, len(rev) - 1)
+    if "revenue" in f.ttm and f.ttm_end:
+        extra = (pd.Timestamp(f.ttm_end) - pd.Timestamp(f.fiscal_years[-1])).days / 365.25
+        return (f.ttm["revenue"] / rev[-1 - n]) ** (1 / (n + extra)) - 1
+    return (rev[-1] / rev[-1 - n]) ** (1 / n) - 1
+
+
 def health(f: Financials) -> dict[str, float | None]:
-    last = lambda k: (f.last(k) or [None])[0]
+    """Latest twelve months (fiscal year if no 10-Q since)."""
+    last = lambda k: f.ttm[k] if k in f.ttm else (f.last(k) or [None])[0]
     rev, ebit, tax, pretax = last("revenue"), last("ebit"), last("tax"), last("pretax")
-    cash, debt, eq, cfo, capex, interest = last("cash") or 0.0, last("debt") or 0.0, last("equity"), last("cfo"), last("capex"), last("interest")
+    cash, debt, eq, cfo, capex, interest = last("cash") or 0.0, (last("debt") or 0.0) + (last("debt_current") or 0.0), last("equity"), last("cfo"), last("capex"), last("interest")
     t = tax / pretax if tax is not None and pretax else 0.25
     invested = (eq or 0.0) + debt - cash
-    revs = f.items["revenue"]
-    n = min(3, len(revs) - 1)
     return {
-        "revenue_cagr_3y": (revs[-1] / revs[-1 - n]) ** (1 / n) - 1,
+        "revenue_cagr_3y": revenue_cagr(f),
         "operating_margin": ebit / rev if ebit is not None and rev else None,
         "fcf_margin": (cfo - capex) / rev if cfo is not None and capex is not None and rev else None,
         "roic": ebit * (1 - t) / invested if ebit is not None and invested > 0 else None,

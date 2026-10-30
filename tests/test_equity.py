@@ -84,8 +84,12 @@ def test_default_spread_and_beta():
 
 
 def test_ttm_base_and_report_is_spanish_markdown():
-    v = value(FIN.model_copy(update={"ttm": {"revenue": 140e9}, "ttm_end": "2025-09-30"}), MKT, A, "2026-10-30")
-    assert v.inputs.revenue == 140e9 and v.ttm_end == "2025-09-30"
+    f = FIN.model_copy(update={"ttm": {"revenue": 133.1e9 * 1.1 ** 0.75, "ebit": 40e9, "revenue_ytd_growth": 0.20,
+                                       "debt_current": 2e9}, "ttm_end": "2025-09-30"})
+    v = value(f, MKT, A, "2026-10-30")
+    assert v.ttm_end == "2025-09-30" and v.inputs.growth == pytest.approx((0.10 + 0.20) / 2, abs=1e-3)  # 3.75y at 10%, YTD 20%
+    assert v.inputs.debt == 12e9
+    assert v.inputs.margin == pytest.approx((31 / 121 + 35 / 133.1 + 40e9 / f.ttm["revenue"]) / 3)
     text = render(value(FIN, MKT, A, "2026-10-30"), A)
     for h in ("# Test Inc (TEST):", "## Tesis", "## Valuación", "## Salud financiera", "## Sensibilidad", "## Riesgos"):
         assert h in text
