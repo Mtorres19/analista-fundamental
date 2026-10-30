@@ -1,4 +1,4 @@
-"""python -m macro report [--date YYYY-MM-DD] [--erp 0.05] [--out report.md]
+"""python -m macro report [--date YYYY-MM-DD] [--erp 0.042] [--out report.md]
 python -m macro dashboard [--date YYYY-MM-DD] [--out dashboard.html]
 python -m macro check     # fetch every declared series once and say which fail
 """
@@ -11,7 +11,6 @@ from datetime import date
 from pathlib import Path
 
 from macro import sources
-from macro.assumptions import DEFAULT_ERP
 from macro.dashboard import build_dashboard
 from macro.report import build_report, render
 
@@ -21,11 +20,11 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     rep = commands.add_parser("report", help="panorama macro y supuestos de valuación")
     rep.add_argument("--date", default=date.today().isoformat(), help="fecha de corte YYYY-MM-DD (default: hoy)")
-    rep.add_argument("--erp", type=float, default=DEFAULT_ERP, help="prima de riesgo de mercado, decimal")
+    rep.add_argument("--erp", type=float, default=None, help="prima de riesgo de mercado, decimal (default: la implícita de Damodaran)")
     rep.add_argument("--out", help="escribe el reporte Markdown aquí y el JSON junto a él")
     dash = commands.add_parser("dashboard", help="página HTML con gráficas, razones y pronósticos")
     dash.add_argument("--date", default=date.today().isoformat(), help="fecha de corte YYYY-MM-DD (default: hoy)")
-    dash.add_argument("--erp", type=float, default=DEFAULT_ERP, help="prima de riesgo de mercado, decimal")
+    dash.add_argument("--erp", type=float, default=None, help="prima de riesgo de mercado, decimal (default: la implícita de Damodaran)")
     dash.add_argument("--out", default="reportes/dashboard.html", help="dónde escribir la página")
     commands.add_parser("check", help="prueba cada serie declarada en sources.SERIES")
     args = parser.parse_args()

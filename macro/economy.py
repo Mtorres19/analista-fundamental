@@ -100,7 +100,7 @@ def build_economy(r: MacroReport, weo: dict[str, pd.DataFrame], fetch: sources.F
         imf=imf, year=year,
         charts={"us_trade": pts(bn(us["trade_balance"])), "mx_goods": pts(bn(goods)),
                 "mx_remit": pts(bn(remit_12m)), "mx_reserves": pts(bn(reserves)),
-                "em_oas": pts(m(risk["em_corp_oas"])), "hy_oas": pts(m(risk["us_hy_oas"]))},
+                "em_oas": pts(risk["em_corp_oas"].dropna()), "hy_oas": pts(risk["us_hy_oas"].dropna())},  # daily
     )
 
 
@@ -127,10 +127,10 @@ def reasons(e: Economy, mk: Markets, r: MacroReport) -> dict[str, list[str]]:
     ]
     risk = [
         f"Riesgo país: no hay una fuente gratuita del CDS soberano de México, así que lo medimos con el diferencial del bono a "
-        f"10 años contra el Treasury ({mk.mx_spread_10y:.2f} pp) y el spread de bonos corporativos emergentes "
-        f"({e.em_oas:.2f} pp, {e.em_oas_1y:+.2f} pp en un año). Nuestro riesgo país en la valuación es {crp:.2f} pp: "
-        + ("más exigente que lo que pide el mercado, conservador." if crp >= mk.mx_spread_10y else
-           "menos de lo que pide el mercado, la valuación podría ser optimista."),
+        f"10 años contra el Treasury ({mk.mx_spread_10y:.2f} pp, que también paga la prima cambiaria del peso) y el spread "
+        f"de bonos corporativos emergentes ({e.em_oas:.2f} pp, {e.em_oas_1y:+.2f} pp en un año), que es el que usamos como "
+        f"spread de impago. Multiplicado por la volatilidad relativa de acciones contra bonos da un riesgo país de {crp:.2f} pp "
+        f"para la valuación.",
     ]
     out += [        f"El spread high yield de EE.UU. está en {e.hy_oas:.2f} pp ({e.hy_oas_1y:+.2f} pp en un año): "
         + ("crédito caro, señal de estrés." if e.hy_oas >= 5 else "crédito barato, sin estrés; el mercado no ve quiebras masivas."),

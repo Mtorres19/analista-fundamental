@@ -2,8 +2,9 @@
 
 Ours is deliberately simple and transparent: the average of (a) trend real growth, the 10y CAGR of real GDP the
 snapshot already computes, and (b) the 10y average of the ex-ante real policy rate (policy minus expected
-inflation: the Cleveland Fed 1y expectation for the US; realized inflation for Mexico, which has no free daily
-expectations series). Nominal neutral = r* + the central bank's inflation target. Rates in percent.
+inflation: the Cleveland Fed 1y expectation for the US; the Banxico survey's next-12-months median for Mexico). Nominal neutral = r* + the central bank's inflation target. The forecast path converges to a Taylor-type rate:
+nominal neutral + 0.5 x (inflation - target) + 0.5 x output gap, the gap read from unemployment (Okun: one point of
+unemployment above its long-run level ~ two points of output below potential). Rates in percent.
 
 shortcut: (b) is a plain rolling mean, not a filter; switch to an HP / Kalman estimate if r* drives decisions.
 """
@@ -20,7 +21,8 @@ from macro.snapshot import _monthly
 TARGET = {"US": 2.0, "MX": 3.0}
 # Banxico's published range for the neutral real rate (Informe Trimestral abril-junio 2019, Recuadro 4).
 BANXICO_RANGE = (1.8, 3.4)
-HALF_LIFE_MONTHS = 12   # convergence-to-neutral path: the gap halves every year
+HALF_LIFE_MONTHS = 12   # convergence path: the gap to the Taylor rate halves every year
+OKUN = 2.0
 
 
 class Neutral(BaseModel):
@@ -34,6 +36,9 @@ class Neutral(BaseModel):
     policy: float
     real_policy: float             # today's ex-ante real policy rate
     history: list[list]            # ex-ante real policy rate, monthly, [ms, %]
+    inflation: float = 0.0         # current yoy, for the Taylor rate
+    unemployment: float = 0.0
+    unemployment_star: float = 0.0  # long run (Fed SEP for the US, 10y average for Mexico)
 
     @property
     def nominal(self) -> float:
@@ -48,10 +53,15 @@ class Neutral(BaseModel):
     def stance(self) -> str:
         return "restrictiva" if self.gap > 0.75 else "laxa" if self.gap < -0.75 else "cerca de neutral"
 
+    @property
+    def taylor(self) -> float:
+        output_gap = -OKUN * (self.unemployment - self.unemployment_star)
+        return self.nominal + 0.5 * (self.inflation - self.target) + 0.5 * output_gap
+
     def path(self, index: pd.DatetimeIndex) -> pd.Series:
-        """Policy rate converging to nominal neutral, one value per forecast date."""
+        """Policy rate converging to the Taylor rate, one value per forecast date."""
         months = pd.Series(range(1, len(index) + 1), index=index)
-        return self.nominal + self.gap * 0.5 ** (months / HALF_LIFE_MONTHS)
+        return self.taylor + (self.policy - self.taylor) * 0.5 ** (months / HALF_LIFE_MONTHS)
 
 
 def build_neutral(r: MacroReport, fetch: sources.Fetch = sources.fetch) -> dict[str, Neutral]:
@@ -59,12 +69,16 @@ def build_neutral(r: MacroReport, fetch: sources.Fetch = sources.fetch) -> dict[
     us, mx = sources.load("US", as_of, fetch), sources.load("MX", as_of, fetch)
     exp_us = _monthly(sources.load("US_ECON", as_of, fetch)["inflation_exp_1y"])
     hlw = sources.load("EXTERNAL", as_of, fetch)["hlw_rstar_us"]
-    infl_mx = (_monthly(mx["cpi"]) / _monthly(mx["cpi"]).shift(freq=pd.DateOffset(years=1)) - 1).dropna() * 100
+    cons = sources.load("CONSENSUS", as_of, fetch)
+    infl_mx = _monthly(cons["mx_infl_12m"])
     out = {}
+    u_star = {"US": float(cons["us_unemp_lr"].iloc[-1]),
+              "MX": float(_monthly(mx["unemployment"]).iloc[-120:].mean())}
     for c, s, expected, snap, ext, label in (
             ("US", us, exp_us, r.us, float(hlw.iloc[-1]), f"NY Fed HLW {hlw.index[-1].year}T{(hlw.index[-1].month - 1) // 3 + 1}"),
             ("MX", mx, infl_mx, r.mx, sum(BANXICO_RANGE) / 2, f"Banxico {BANXICO_RANGE[0]:.1f}–{BANXICO_RANGE[1]:.1f}% (2019)")):
-        out[c] = neutral_from(c, _monthly(s["policy_rate"]), expected, snap.gdp_trend * 100, ext, label)
+        out[c] = neutral_from(c, _monthly(s["policy_rate"]), expected, snap.gdp_trend * 100, ext, label).model_copy(
+            update={"inflation": snap.inflation_yoy * 100, "unemployment": snap.unemployment * 100, "unemployment_star": u_star[c]})
     return out
 
 

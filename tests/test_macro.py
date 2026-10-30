@@ -4,23 +4,37 @@ import pytest
 from macro import sources
 from macro.report import build_report, render
 
-LEVELS = {"DGS10": 4.2, "DFF": 4.3, "T10YIE": 2.3, "BAA10Y": 1.8, "IRLTLT01MXM156N": 9.0,
+LEVELS = {"DGS10": 4.2, "DFF": 4.3, "T10YIE": 2.3, "BAA10Y": 1.8, "M10": 9.0,
           "SF61745": 8.0, "LRHUTTTTMXM156S": 2.8, "UNRATE": 4.0, "VIXCLS": 18.0}
 # Index series and their annual growth rate.
 GROWING = {"CPIAUCSL": 0.03, "SP1": 0.04, "GDPC1": 0.02, "NGDPRSAXDCMXQ": 0.01,
-           "DEXMXUS": 0.0, "DTWEXBGS": 0.0, "DCOILBRENTEU": 0.0, "PCOPPUSDM": 0.0}
+           "SF43718": 0.0, "DTWEXBGS": 0.0, "DCOILBRENTEU": 0.0}
 
 
 # Curves: an inverted Treasury curve (3m 5.0 > 10y 4.2), real 10y above 2%, a normal Mexican curve.
 CURVES = {"DGS1MO": 5.0, "DGS3MO": 5.0, "DGS6MO": 4.9, "DGS1": 4.8, "DGS2": 4.5, "DGS3": 4.4, "DGS5": 4.3,
           "DGS7": 4.25, "DGS20": 4.4, "DGS30": 4.5, "DFII5": 2.1, "DFII10": 2.2, "DFII30": 2.3,
-          "SF43936": 8.0, "SF43939": 8.1, "SF43942": 8.2, "SF43945": 8.3, "SF43883": 8.6, "SF43886": 8.8,
+          "DFII7": 2.15, "DFII20": 2.25, "SF331451": 7.9,
+          "SF45470": 8.0, "SF45471": 8.1, "SF45472": 8.2, "SF45473": 8.3, "SF43883": 8.6, "SF43886": 8.8,
           "SF44071": 9.0, "SF45384": 9.3, "SF60696": 9.5,
           "SF61592": 4.0, "SF43924": 4.2, "SF46958": 4.4, "SF46961": 4.5}
+# Price vector: every bucket priced at par (dirty 100, Udibonos 100 UDIs at UDI = 8) with whole coupon periods,
+# so each yield equals its coupon: Bonos 8.6..9.5, Udibonos 4.0..4.5.
+VECTOR = {"SF349889": 8.4, "SF349886": 728, "SP68257": 8.0}
+for ids, cpn, periods in ((("SF45427", "SF45449", "SF45475"), 8.6, 6), (("SF45428", "SF45451", "SF45476"), 8.8, 10),
+                          (("SF45429", "SF45453", "SF45477"), 8.9, 14), (("SF45430", "SF45455", "SF45478"), 9.0, 20),
+                          (("SF45431", "SF45457", "SF45479"), 9.3, 40), (("SF60720", "SF60722", "SF60723"), 9.5, 56),
+                          (("SF61784", "SF61786", "SF61787"), 4.0, 6), (("SF45432", "SF45459", "SF45480"), 4.2, 20),
+                          (("SF50761", "SF50766", "SF50763"), 4.4, 40), (("SF50762", "SF50768", "SF50764"), 4.5, 60)):
+    VECTOR.update({ids[0]: 182 * periods, ids[1]: 800.0 if cpn < 5 else 100.0, ids[2]: cpn})
+
 # Activity, external and risk series: flat levels (zero growth) are enough for the cross-feeds under test.
 ECON = {"BOPGSTB": -60000, "IEABC": -250000, "INDPRO": 100, "RSAFS": 700000, "PAYEMS": 150000, "UMCSENT": 60,
         "EXPINF1YR": 2.5, "SE44352": -2000, "SE44355": 150000, "SE44374": 140000, "SE27803": 5000, "SF43707": 230000,
-        "SR17692": 110, "BAMLEMCBPIOAS": 2.0, "BAMLH0A0HYM2": 6.0, "rstar": 0.8}
+        "SR17692": 110, "BAMLEMCBPIOAS": 2.0, "BAMLH0A0HYM2": 6.0, "rstar": 0.8,
+        # Consensus, Damodaran ERP (%), BIS real effective peso.
+        "SR14195": 4.1, "SR14209": 3.8, "SR14216": 3.7, "SR14469": 1.8, "SR14749": 7.5, "SR14756": 7.0,
+        "GDPC1MDLR": 1.8, "UNRATEMDLR": 4.0, "T5YIE": 2.4, "ERP (T12 m with sustainable payout)": 4.2, "RBMXBIS": 100.0}
 
 
 def fake_fetch(source: str, sid: str) -> pd.Series:
@@ -30,16 +44,25 @@ def fake_fetch(source: str, sid: str) -> pd.Series:
         return pd.Series(LEVELS[sid], index=idx)
     if sid in CURVES:
         return pd.Series(CURVES[sid], index=idx)
+    if sid in VECTOR:
+        return pd.Series(float(VECTOR[sid]), index=idx)
     if sid in ECON:
         return pd.Series(float(ECON[sid]), index=idx)
+    if source == "yahoo_curve":  # futures by delivery month: Fed funds at 95.5 (4.5%), commodities flat
+        months = pd.date_range("2026-07-01", periods=15, freq="MS")
+        return pd.Series(95.5 if sid.startswith("ZQ") else 80.0, index=months)
     if source == "yahoo":  # indices grow 8% a year; the IPC falls 20% from June 2026
         s = pd.Series([1000 * 1.08 ** (i / 12) for i in range(len(idx))], index=idx)
         if sid == "^MXX":
             s[s.index >= "2026-06-01"] *= 0.8
         return s
     per_year = 4 if quarterly else 12
-    base = 18.0 if sid == "DEXMXUS" else 100.0
+    base = 18.0 if sid == "SF43718" else 100.0
     return pd.Series([base * (1 + GROWING[sid]) ** (i / per_year) for i in range(len(idx))], index=idx)
+
+
+def no_options(ticker, target_days=30):
+    raise sources.DataError("no option chains in tests")
 
 
 def fake_weo(indicator: str) -> pd.DataFrame:
@@ -74,8 +97,9 @@ def test_mexico_extras(report):
     e = report.mx_extras
     assert e.carry_vs_us == pytest.approx(0.037)
     assert e.real_carry_vs_us == pytest.approx(0.04 - 0.013, abs=1e-6)
-    # Flat nominal peso + higher MX inflation => real peso keeps appreciating: below its 10y average.
-    assert e.real_fx_gap < 0
+    # Flat nominal peso + higher MX inflation => the bilateral real peso keeps appreciating: below its 10y average.
+    assert e.real_fx_gap_bilateral < 0
+    assert e.real_fx_gap == pytest.approx(0.0)   # the BIS index is flat in the fixture
 
 
 def test_global_and_imf_comparison(report):
@@ -90,14 +114,28 @@ def test_assumptions(report):
     us, mx = report.assumptions
     assert us.cost_of_equity() == pytest.approx(0.042 + 0.05)
     assert us.cost_of_equity(1.5) == pytest.approx(0.042 + 0.075)
-    assert us.terminal_growth == pytest.approx(0.042)  # 2.3% + 2% = 4.3%, capped at the 10y
+    assert us.terminal_growth == pytest.approx(0.041)  # breakeven 2.3% + Fed long-run growth 1.8% = 4.1%, under the 10y
 
-    # MX 10y 9% in dollars: 1.09 * 1.023 / 1.04 - 1 = 7.22%; spread over 4.2% = 3.02pp; x1.5
-    spread = 1.09 * 1.023 / 1.04 - 1 - 0.042
-    assert mx.country_risk_premium == pytest.approx(spread * 1.5)
-    usd = 0.042 + 0.05 + spread * 1.5
-    assert mx.cost_of_equity() == pytest.approx((1 + usd) * 1.04 / 1.023 - 1)
-    assert mx.terminal_growth == pytest.approx(0.04 + 0.01, abs=1e-6)
+    # CRP = default spread (EM corporate OAS 2.0%) x vol ratio; the fixture's flat 10y has no volatility, so the
+    # ratio falls back to 1.5. Converted to pesos once, with the survey's 1-4y inflation (3.8%) vs the breakeven.
+    assert mx.default_spread == pytest.approx(0.02) and mx.equity_bond_vol == pytest.approx(1.5)
+    assert mx.country_risk_premium == pytest.approx(0.03)
+    usd = 0.042 + 0.05 + 0.03
+    assert mx.cost_of_equity() == pytest.approx((1 + usd) * 1.038 / 1.023 - 1)
+    # Terminal: the survey's 10y real growth (1.8%) + its 5-8y inflation (3.7%); our own trend (1%) kept alongside.
+    assert mx.terminal_growth == pytest.approx(0.018 + 0.037, abs=1e-6)
+    assert mx.real_growth_ours == pytest.approx(0.01, abs=1e-4)
+
+
+def test_equity_bond_vol_ratio():
+    import numpy as np
+    from macro.assumptions import equity_bond_vol_ratio
+    idx = pd.date_range("2018-01-01", periods=96, freq="MS")
+    rng = np.random.default_rng(0)
+    eq = pd.Series(np.exp(np.cumsum(rng.normal(0, 0.04, 96))), index=idx)     # 4% monthly equity vol
+    y = pd.Series(8 + np.cumsum(rng.normal(0, 0.25, 96)), index=idx)          # 25bp monthly -> 1.6% bond vol
+    assert equity_bond_vol_ratio(eq, y) == pytest.approx(0.04 / (6.5 * 0.0025), rel=0.25)
+    assert equity_bond_vol_ratio(eq.iloc[-12:], y.iloc[-12:]) == 1.5       # too little history: global ratio
 
 
 def test_publication_lag_hides_unreleased_prints():
@@ -155,7 +193,7 @@ def test_dashboard_page():
     import json
 
     from macro.dashboard import build_dashboard
-    page = build_dashboard("2026-06-30", fetch=fake_fetch, weo_fetch=fake_weo)
+    page = build_dashboard("2026-06-30", fetch=fake_fetch, weo_fetch=fake_weo, options=no_options)
     data = json.loads(page.split('type="application/json">')[1].split("</script>")[0])
     assert {"Mundo", "EE.UU.", "México", "Supuestos"} <= data["reasons"].keys()
     assert {"US_infl", "MX_fx", "brent", "vix"} <= data["charts"].keys()
@@ -186,7 +224,7 @@ def test_markets_cross_feeds(report):
     assert m.recession_prob == pytest.approx(0.5, abs=0.05)
     assert m.us_policy_gap == pytest.approx(4.5 - 4.3)        # 2y over fed funds
     assert m.mx_spread_10y == pytest.approx(9.0 - 4.2)
-    assert m.mx_us_spread["1y"] == pytest.approx(8.3 - 4.8)
+    assert m.mx_us_spread["1y"] == pytest.approx(8.3 - 4.8, abs=0.15)   # on the fitted curves
     assert m.us_curve.years[0] == pytest.approx(1 / 12)
     flags = m.flags
     assert any("invertida" in f for f in flags["EE.UU."])
@@ -204,10 +242,12 @@ def test_neutral_rate_and_stance(report):
     assert us.rstar == pytest.approx((2.0 + 1.8) / 2, abs=1e-6)
     assert us.gap == pytest.approx(4.3 - 3.9, abs=1e-6) and us.stance == "cerca de neutral"
     assert us.external == pytest.approx(0.8)
-    # MX: trend 1%, real = 8.0 - 4.0 inflation = 4.0 -> r* 2.5, nominal 5.5, policy 8.0: restrictive.
-    assert mx.rstar == pytest.approx(2.5, abs=1e-6) and mx.stance == "restrictiva"
+    # MX: trend 1%, real = 8.0 - 4.1 survey expectation = 3.9 -> r* 2.45, nominal 5.45, policy 8.0: restrictive.
+    assert mx.rstar == pytest.approx(2.45, abs=1e-6) and mx.stance == "restrictiva"
+    # Taylor: 5.45 nominal + 0.5 x (4.0 - 3.0) inflation gap + 0 (unemployment at its average) = 5.95.
+    assert mx.taylor == pytest.approx(5.95, abs=1e-6)
     path = mx.path(pd.date_range("2026-07-01", periods=12, freq="MS"))
-    assert path.iloc[-1] == pytest.approx(mx.nominal + mx.gap / 2)   # the gap halves in a year
+    assert path.iloc[-1] == pytest.approx(mx.taylor + (mx.policy - mx.taylor) / 2)   # the distance halves in a year
     idx = pd.date_range("2020-01-01", periods=12, freq="MS")
     with pytest.raises(sources.DataError):
         neutral_from("US", pd.Series(4.0, index=idx), pd.Series(2.0, index=idx), 2.0, None, "")
@@ -232,3 +272,81 @@ def test_parse_hlw_rejects_unknown_layout():
     pd.DataFrame({"a": [1, 2]}).to_excel(buf, sheet_name="HLW Estimates", index=False, header=False)
     with pytest.raises(sources.DataError):
         sources.parse_hlw(buf.getvalue())
+
+
+def test_nss_fit_recovers_known_curve():
+    import numpy as np
+    from macro.markets import NSS, fit_nss
+    true = NSS(betas=[5.0, -1.5, 2.0, -1.0], tau1=1.8, tau2=8.0)
+    years = [1 / 12, 0.25, 0.5, 1, 2, 3, 5, 7, 10, 20, 30]
+    fit = fit_nss(years, list(true(years)))
+    grid = np.linspace(0.1, 30, 60)
+    assert np.abs(fit(grid) - true(grid)).max() < 0.03          # within 3bp across the curve
+    assert fit(30) == pytest.approx(true(30), abs=0.01)
+    ns = fit_nss([3, 10, 20, 30], [4.0, 4.2, 4.4, 4.5])        # few nodes -> plain Nelson-Siegel
+    assert ns.tau2 is None and len(ns.betas) == 3
+    with pytest.raises(sources.DataError):
+        fit_nss([1, 2, 3], [4, 4, 4])
+
+
+def test_ytm_mexican_convention():
+    import numpy as np
+    from macro.markets import ytm
+    # Coupon = yield and whole coupon periods -> par; a cheaper price means a higher yield.
+    assert ytm([100.0], [8.0], [182 * 20])[0] == pytest.approx(8.0, abs=1e-6)
+    assert ytm([95.0], [8.0], [182 * 20])[0] > 8.0
+    assert np.isnan(ytm([np.nan], [8.0], [3640])[0])
+
+
+def test_mexico_curve_from_price_vector(report):
+    from macro.markets import build_markets
+    m = build_markets(report, fake_fetch)
+    assert m.mx_curve.at("10y") == pytest.approx(9.0, abs=1e-4)          # par bond yields its coupon
+    assert m.mx_real_curve.at("10y") == pytest.approx(4.2, abs=1e-4)     # Udibono price / UDI value
+    assert m.mx_curve.years_by["now"][m.mx_curve.tenors.index("30y")] == pytest.approx(182 * 56 / 365, abs=1e-3)
+
+
+def test_fedwatch_hike_mid_month():
+    from macro.policy import fedwatch, step_distribution
+    # Meeting on 15-Dec: Dec averages 15 days at 4.00 and 16 at 4.25; January (no meeting) shows 4.25.
+    dec = (15 * 4.00 + 16 * 4.25) / 31
+    avg = pd.Series([4.00, dec, 4.25], index=pd.to_datetime(["2026-11-01", "2026-12-01", "2027-01-01"]))
+    path = fedwatch(avg, [pd.Timestamp("2026-12-15")], current=4.00)
+    assert path[0]["before"] == pytest.approx(4.00) and path[0]["after"] == pytest.approx(4.25)
+    row = step_distribution(path, 4.00)[0]
+    assert row["p_hike"] == pytest.approx(1.0) and row["cum"][1] == pytest.approx(1.0)
+    # Half a hike priced: 50/50 between hold and +25, and the steps compound across two meetings.
+    half = step_distribution([{"date": 1, "before": 4.0, "after": 4.125}, {"date": 2, "before": 4.125, "after": 4.25}], 4.0)
+    assert half[0]["p_hike"] == pytest.approx(0.5) and half[1]["cum"][0] == pytest.approx(0.25)
+    assert half[1]["cum"][1] == pytest.approx(0.5) and half[1]["cum"][2] == pytest.approx(0.25)
+    # Without a clean month after the meeting, the post-meeting rate comes from the meeting month's average.
+    solo = fedwatch(avg.iloc[:2], [pd.Timestamp("2026-12-15")], current=4.00)
+    assert solo[0]["after"] == pytest.approx(4.25)
+
+
+def test_cetes_forwards_and_buckets():
+    from macro.policy import cetes_forwards, normal_buckets
+    f = cetes_forwards({28: 7.0, 91: 7.0})
+    g1, g2 = 1 + 0.07 * 28 / 360, 1 + 0.07 * 91 / 360
+    assert f[0] == (0, 28, 7.0) and f[1][2] == pytest.approx((g2 / g1 - 1) * 360 / 63 * 100)   # simple yields: forward a bit lower
+    b = normal_buckets(4.0, 0.25, 4.0)
+    assert sum(b.values()) == pytest.approx(1.0) and b[1] == pytest.approx(b[-1]) and b[0] > b[1]
+
+
+def test_country_risk_compares_the_real_spread(report):
+    from macro.markets import build_markets, country_risk_text
+    m = build_markets(report, fake_fetch)
+    # Udibono 10y 4.2% (par) minus TIPS 10y 2.2% = 2.0 pp real; nominal Bono M 9.0 - Treasury 4.2 = 4.8 pp.
+    assert m.mx_real_spread_10y == pytest.approx(2.0, abs=1e-4)
+    assert "conservador" in country_risk_text(m, 3.0)          # 3.0 pp CRP > 2.0 real: conservative
+    assert "optimista" in country_risk_text(m, 1.5)
+    assert "4.80 pp" in country_risk_text(m, 3.0)              # the nominal one is still shown, as context
+
+
+def test_global_flags_print_the_actual_move():
+    from macro.snapshot import GlobalSnapshot
+    w = GlobalSnapshot(as_of="2026-10-29", year=2026, vix=20, dollar_yoy=0.08, brent_yoy=0.88, copper_yoy=-0.15,
+                       g20_growth_median=0.02, g20_breadth=0.5, growth={}, inflation={})
+    flags = " | ".join(w.flags)
+    assert "petróleo +88% anual" in flags and "+25%" not in flags
+    assert "dólar fuerte (+8.0% anual)" in flags and "cobre cayendo -15.0% anual" in flags

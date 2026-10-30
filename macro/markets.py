@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pandas as pd
 from pydantic import BaseModel
 
@@ -33,13 +34,90 @@ def recession_probability(spread_3m10y_pp: float) -> float:
     return 0.5 * (1 + math.erf(z / math.sqrt(2)))
 
 
+STD_TENORS = (1, 2, 3, 5, 7, 10, 20, 30)   # years, where curves are compared on their fitted values
+
+
+class NSS(BaseModel):
+    """Nelson-Siegel(-Svensson) curve: yield in % at maturity t in years. tau2 None = plain Nelson-Siegel."""
+    betas: list[float]
+    tau1: float
+    tau2: float | None = None
+
+    def __call__(self, t):
+        y = _ns_basis(np.atleast_1d(np.asarray(t, float)), self.tau1, self.tau2) @ np.asarray(self.betas)
+        return float(y[0]) if np.ndim(t) == 0 else y
+
+
+def _ns_basis(t: np.ndarray, tau1: float, tau2: float | None) -> np.ndarray:
+    hump = lambda tau: ((1 - np.exp(-t / tau)) / (t / tau), (1 - np.exp(-t / tau)) / (t / tau) - np.exp(-t / tau))
+    f1, f2 = hump(tau1)
+    cols = [np.ones_like(t), f1, f2] + ([hump(tau2)[1]] if tau2 is not None else [])
+    return np.column_stack(cols)
+
+
+def fit_nss(years: list[float], yields: list[float]) -> NSS:
+    """Least squares on the betas over a grid of decay parameters. Svensson only with 7+ nodes, else Nelson-Siegel,
+    so a short curve (the real ones have 4-5 nodes) is not over-fitted."""
+    t, y = np.asarray(years, float), np.asarray(yields, float)
+    if len(t) < 4:
+        raise sources.DataError(f"curve fit needs at least 4 nodes, got {len(t)}")
+    best = None
+    for tau1 in np.geomspace(0.1, 10, 40):
+        for tau2 in (np.geomspace(tau1 * 1.5, 30, 16) if len(t) >= 7 else [None]):
+            X = _ns_basis(t, tau1, tau2)
+            b = np.linalg.lstsq(X, y, rcond=None)[0]
+            err = float(((X @ b - y) ** 2).sum())
+            if best is None or err < best[0] - 1e-12:
+                best = (err, b, tau1, tau2)
+    _, b, tau1, tau2 = best
+    return NSS(betas=[float(x) for x in b], tau1=float(tau1), tau2=None if tau2 is None else float(tau2))
+
+
+def ytm(dirty, coupon, days):
+    """Yield to maturity, % a year, of Mexican fixed-coupon bonds (Bonos M, Udibonos): 182-day coupon periods,
+    coupon per period = coupon% * 182/360 per 100, discounting at (1 + y * 182/360) per period, the first one
+    fractional (days to next coupon / 182). Works elementwise on arrays (one bond per date); NaN in, NaN out."""
+    p, c, d = (np.asarray(x, float) for x in (dirty, coupon, days))
+    n = np.ceil(d / 182)
+    first = np.where(d % 182 == 0, 182, d % 182) / 182
+    cpn = c * 182 / 360
+    k = np.arange(int(np.nanmax(n)) if np.isfinite(n).any() else 0)[:, None]   # coupon index, rows
+    def price(y):
+        disc = (1 + y * 182 / 36000) ** -(first + k)
+        flows = np.where(k < n, cpn, 0) + np.where(k == n - 1, 100, 0)
+        return (flows * disc).sum(axis=0)
+    lo, hi = np.full(p.shape, -5.0), np.full(p.shape, 40.0)
+    for _ in range(70):                    # bisection: price falls as the yield rises
+        mid = (lo + hi) / 2
+        cheap = price(mid) < p
+        hi, lo = np.where(cheap, mid, hi), np.where(cheap, lo, mid)
+    out = (lo + hi) / 2
+    return np.where(np.isfinite(p) & np.isfinite(c) & np.isfinite(d) & (d > 0), out, np.nan)
+
+
+def vector_nodes(v: dict[str, pd.Series], prefix: str, real: bool) -> dict[str, tuple[pd.Series, pd.Series]]:
+    """Daily yield and years to maturity for each price-vector bucket (M3..M30 or U3..U30), keyed '3y', '10y'..."""
+    out = {}
+    for name in sorted({k.split("_")[0] for k in v if k.startswith(prefix)}, key=lambda b: int(b[1:])):
+        df = pd.concat({f: v[f"{name}_{f}"] for f in ("plazo", "sucio", "cupon")}, axis=1).dropna()
+        if real:  # Udibonos are priced in pesos: per 100 UDIs with that day's UDI value
+            df["sucio"] = df["sucio"] / v["udi"].reindex(df.index, method="ffill")
+            df = df.dropna()
+        df = df[df.index > df.index[-1] - pd.DateOffset(years=6)] if len(df) else df
+        out[f"{name[1:]}y"] = (pd.Series(ytm(df["sucio"], df["cupon"], df["plazo"]), index=df.index).dropna(),
+                               df["plazo"] / 365)
+    return out
+
+
 class Curve(BaseModel):
     country: str
     tenors: list[str]
     years: list[float]
+    years_by: dict[str, list[float]] = {}   # per date when maturities move (price-vector buckets roll down)
     now: list[float | None]
     m3: list[float | None]      # three months before as_of
     y1: list[float | None]      # a year before as_of
+    fits: dict[str, NSS | None]  # "now" / "m3" / "y1" -> fitted curve, None with too few nodes that day
 
     def at(self, tenor: str) -> float | None:
         return self.now[self.tenors.index(tenor)]
@@ -67,7 +145,9 @@ class Markets(BaseModel):
     mx_curve: Curve
     us_real: dict[str, float]
     us_real_curve: Curve
-    mx_real_curve: Curve          # Udibonos
+    mx_real_curve: Curve          # Udibonos, from the price vector
+    mx_10y_daily: list[list]      # Bono M 7-10y bucket yield, daily, [ms, %]
+    us10_daily: list[list]
     us_2s10s: float
     us_3m10y: float
     mx_28d10y: float
@@ -76,6 +156,7 @@ class Markets(BaseModel):
     mx_policy_gap: float        # 364d CETES minus the Banxico rate
     mx_us_spread: dict[str, float]
     mx_spread_10y: float
+    mx_real_spread_10y: float | None   # Udibono 10y minus TIPS 10y: the spread net of inflation and peso premia
     slopes: dict[str, list[list]]   # history for the chart: 2s10s, 3m10y, recession probability
 
     @property
@@ -110,32 +191,45 @@ def build_markets(r: MacroReport, fetch: sources.Fetch = sources.fetch) -> Marke
     ipc = idx["IPC México"]
     ipc_usd = _index("IPC México en dólares", (ipc / fx.reindex(ipc.index, method="ffill")).dropna(), "USD", coe_us)
 
-    us_curve, mx_curve = _curve("US", us_c, as_of), _curve("MX", mx_c, as_of)
+    v = sources.load("MX_VECTOR", as_of, fetch)
+    auction = sources.load("MX_AUCTION", as_of, fetch)
+    nominal, realv = vector_nodes(v, "M", real=False), vector_nodes(v, "U", real=True)
+    # A bucket with no price in 60 days (Bonos 5-7 often reads N/E) falls back to that tenor's auction yield.
+    stale = lambda ser: ser.empty or ser.index[-1] < pd.Timestamp(as_of) - pd.Timedelta(days=60)
+    for nodes, pre in ((nominal, ""), (realv, "udi_")):
+        for t, (y, yrs) in list(nodes.items()):
+            if stale(y) and pre + t in auction:
+                nodes[t] = (auction[pre + t], pd.Series(tenor_years(t), index=auction[pre + t].index))
+    mx_series = {**{k: x for k, x in mx_c.items() if k != "2y"}, "2y": mx_c["2y"], **{t: y for t, (y, _) in nominal.items()}}
+    mx_years = {"2y": v["cetes2y_plazo"] / 365, **{t: yrs for t, (_, yrs) in nominal.items()}}
+    us_curve, mx_curve = _curve("US", us_c, as_of), _curve("MX", mx_series, as_of, mx_years)
+    self_real = _curve("MX", {t: y for t, (y, _) in realv.items()}, as_of, {t: yrs for t, (_, yrs) in realv.items()})
     for c, tenors in ((us_curve, ("2y", "10y")), (mx_curve, ("28d", "364d", "10y"))):
         for t in tenors:
             if c.at(t) is None:
                 raise sources.DataError(f"{c.country} curve: no {t} yield in the 60 days before {as_of}")
     s3m10y = us_c["10y"] - us_c["3m"].reindex(us_c["10y"].index)
     s2s10 = us_c["10y"] - us_c["2y"].reindex(us_c["10y"].index)
-    monthly = lambda s: s.dropna().resample("MS").mean().dropna()
-    hist = lambda s: monthly(s)[monthly(s).index > pd.Timestamp(as_of) - pd.DateOffset(years=20)]
+    hist = lambda s: s.dropna()[s.dropna().index > pd.Timestamp(as_of) - pd.DateOffset(years=10)]   # daily
     prob = hist(s3m10y).apply(recession_probability) * 100
 
-    spread = {}
-    for t_mx, t_us in (("364d", "1y"), ("3y", "3y"), ("5y", "5y"), ("10y", "10y"), ("20y", "20y"), ("30y", "30y")):
-        a, b = mx_curve.at(t_mx), us_curve.at(t_us)
-        if a is not None and b is not None:
-            spread[t_us] = round(a - b, 3)
+    # On the fitted curves, so tenors one country does not issue still compare.
+    fm, fu = mx_curve.fits["now"], us_curve.fits["now"]
+    if fm is None or fu is None:
+        raise sources.DataError("curve fit: fewer than 4 nodes today on the US or Mexico curve")
+    spread = {f"{t}y": round(float(fm(t) - fu(t)), 3) for t in STD_TENORS}
     return Markets(
         as_of=as_of, indices=stats, ipc_usd=ipc_usd, us_curve=us_curve, mx_curve=mx_curve, us_real=real,
         us_real_curve=_curve("US", sources.load("US_REAL", as_of, fetch), as_of),
-        mx_real_curve=_curve("MX", sources.load("MX_REAL", as_of, fetch), as_of),
+        mx_real_curve=self_real, mx_10y_daily=_pts(mx_series["10y"][mx_series["10y"].index > pd.Timestamp(as_of) - pd.DateOffset(years=5)]),
+        us10_daily=_pts(us_c["10y"].dropna()[us_c["10y"].dropna().index > pd.Timestamp(as_of) - pd.DateOffset(years=5)]),
         us_2s10s=float(s2s10.dropna().iloc[-1]), us_3m10y=float(s3m10y.dropna().iloc[-1]),
         mx_28d10y=mx_curve.at("10y") - mx_curve.at("28d"),
         recession_prob=recession_probability(float(s3m10y.dropna().iloc[-1])),
         us_policy_gap=us_curve.at("2y") - r.us.policy_rate * 100,
         mx_policy_gap=mx_curve.at("364d") - r.mx.policy_rate * 100,
-        mx_us_spread=spread, mx_spread_10y=spread["10y"],
+        mx_us_spread=spread, mx_spread_10y=mx_curve.at("10y") - us_curve.at("10y"),
+        mx_real_spread_10y=(self_real.at("10y") - real["10y"]) if self_real.at("10y") is not None and "10y" in real else None,
         slopes={"2s10s": _pts(hist(s2s10)), "3m10y": _pts(hist(s3m10y)), "prob": _pts(prob)},
     )
 
@@ -181,14 +275,23 @@ def reasons(m: Markets, r: MacroReport) -> dict[str, list[str]]:
                   else "el peso le resta al inversionista en dólares.")
                + f" México está en {regime[r.mx.regime]}.")
     crp = r.assumptions[1].country_risk_premium * 100
-    out.append(f"El bono a 10 años de México paga {m.mx_spread_10y:.2f} pp sobre el Treasury; nuestro riesgo país en la "
-               f"valuación es {crp:.2f} pp. " + ("El supuesto es más exigente que el mercado: conservador."
-                                                   if crp >= m.mx_spread_10y else
-                                                   "El mercado pide más que nuestro supuesto: la valuación podría ser optimista."))
+    out.append(country_risk_text(m, crp))
     worst = min(m.indices, key=lambda i: i.drawdown)
     out.append(f"El índice más lejos de su máximo de 52 semanas es {worst.name} ({worst.drawdown:.1%}); "
                f"el más volátil a 3 meses es {max(m.indices, key=lambda i: i.vol_3m).name}.")
     return {"Curvas": curves, "Mercados": out}
+
+
+def country_risk_text(m: Markets, crp: float) -> str:
+    """Our country-risk premium against the market's real spread. The nominal 10y spread also pays Mexico's higher
+    inflation and the peso's risk, which the valuation prices separately, so it is not the comparison."""
+    head = (f"El bono a 10 años de México paga {m.mx_spread_10y:.2f} pp sobre el Treasury en términos nominales, pero buena parte es "
+            "inflación y prima cambiaria. ")
+    if m.mx_real_spread_10y is None:
+        return head + f"Sin Udibono a 10 años reciente no hay spread real que comparar con nuestro riesgo país ({crp:.2f} pp)."
+    return head + (f"En términos reales (Udibono − TIPS) el diferencial es {m.mx_real_spread_10y:.2f} pp, y nuestro riesgo país en la "
+                   f"valuación es {crp:.2f} pp: " + ("más exigente que el mercado, conservador." if crp >= m.mx_real_spread_10y
+                                                      else "menos de lo que pide el mercado, la valuación podría ser optimista."))
 
 
 def _index(name: str, s: pd.Series, currency: str, coe: float) -> IndexStats:
@@ -208,15 +311,23 @@ def _index(name: str, s: pd.Series, currency: str, coe: float) -> IndexStats:
     )
 
 
-def _curve(country: str, s: dict[str, pd.Series], as_of: str) -> Curve:
+def _curve(country: str, s: dict[str, pd.Series], as_of: str, maturity: dict[str, pd.Series] | None = None) -> Curve:
+    """maturity: years to maturity by date for nodes whose maturity moves; other nodes sit at their nominal tenor."""
     t = pd.Timestamp(as_of)
+    maturity = maturity or {}
     # A tenor auctioned only now and then counts as "now" if printed in the last 60 days.
     at = lambda ser, when: (None if ser[ser.index <= when].empty or ser[ser.index <= when].index[-1] < when - pd.Timedelta(days=60)
                             else round(float(ser[ser.index <= when].iloc[-1]), 3))
     tenors = list(s)
-    return Curve(country=country, tenors=tenors, years=[tenor_years(k) for k in tenors],
-                 now=[at(s[k], t) for k in tenors], m3=[at(s[k], t - pd.DateOffset(months=3)) for k in tenors],
-                 y1=[at(s[k], t - pd.DateOffset(years=1)) for k in tenors])
+    dates = {"now": t, "m3": t - pd.DateOffset(months=3), "y1": t - pd.DateOffset(years=1)}
+    yrs = lambda k, d: round(float(maturity[k][maturity[k].index <= d].iloc[-1]), 4) \
+        if k in maturity and not maturity[k][maturity[k].index <= d].empty else tenor_years(k)
+    years_by = {key: [yrs(k, d) for k in tenors] for key, d in dates.items()}
+    vals = {key: [at(s[x], d) for x in tenors] for key, d in dates.items()}
+    fit = lambda key: (fit_nss([y for y, x in zip(years_by[key], vals[key]) if x is not None], [x for x in vals[key] if x is not None])
+                       if sum(x is not None for x in vals[key]) >= 4 else None)
+    return Curve(country=country, tenors=tenors, years=years_by["now"], years_by=years_by, **vals,
+                 fits={key: fit(key) for key in dates})
 
 
 def _pts(series: pd.Series) -> list[list]:

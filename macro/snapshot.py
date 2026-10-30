@@ -24,6 +24,7 @@ class CountrySnapshot(BaseModel):
     inflation_yoy_6m_ago: float
     gdp_yoy: float
     gdp_trend: float            # 10y CAGR of real GDP
+    gdp_trend_ex_covid: float   # average yoy growth over 10y leaving out 2020-2021, for long-run assumptions
     unemployment: float
     sahm_gap: float             # 3m avg unemployment minus its prior 12m low
     breakeven_10y: float | None = None
@@ -75,7 +76,9 @@ class MexicoExtras(BaseModel):
     fx_yoy: float
     carry_vs_us: float          # Banxico rate minus fed funds
     real_carry_vs_us: float     # same, net of each inflation
-    real_fx_gap: float          # real peso vs its 10y average; > 0 = peso weaker than usual (cheap)
+    real_fx_gap: float          # BIS real effective peso vs its 10y average; > 0 = peso weaker than usual (cheap)
+    real_fx_gap_bilateral: float  # same against the dollar only, from USD/MXN and both CPIs
+    reer_date: str = ""         # month of the last BIS print, rolled forward to today with the FIX
 
     @property
     def flags(self) -> list[str]:
@@ -115,11 +118,11 @@ class GlobalSnapshot(BaseModel):
         if self.vix >= 25:
             flags.append(f"aversión al riesgo (VIX {self.vix:.0f})")
         if self.dollar_yoy > 0.05:
-            flags.append("dólar fuerte (+5% anual): presión para emergentes")
+            flags.append(f"dólar fuerte ({self.dollar_yoy:+.1%} anual): presión para emergentes")
         if self.copper_yoy < -0.10:
-            flags.append("cobre cayendo >10% anual: señal de demanda industrial débil")
+            flags.append(f"cobre cayendo {self.copper_yoy:.1%} anual: señal de demanda industrial débil")
         if self.brent_yoy > 0.25:
-            flags.append("petróleo +25% anual: presión inflacionaria")
+            flags.append(f"petróleo {self.brent_yoy:+.0%} anual: presión inflacionaria")
         return flags
 
 
@@ -162,6 +165,7 @@ def build_country(country: str, as_of: str, s: dict[str, pd.Series]) -> CountryS
         inflation_yoy_6m_ago=_yoy(s["cpi"], months_back=6),
         gdp_yoy=_yoy(s["gdp"]),
         gdp_trend=_cagr(s["gdp"], years=10),
+        gdp_trend_ex_covid=_growth_ex_covid(s["gdp"], years=10),
         unemployment=_last(s["unemployment"]) / 100,
         sahm_gap=float(unrate.iloc[-1] - unrate.iloc[-13:-1].min()) / 100,
         breakeven_10y=_last(s["breakeven_10y"]) / 100 if "breakeven_10y" in s else None,
@@ -175,12 +179,21 @@ def build_mexico_extras(mx: dict[str, pd.Series], us: dict[str, pd.Series],
     # Real exchange rate: pesos per dollar adjusted by relative prices.
     real = (fx * _monthly(us["cpi"]) / _monthly(mx["cpi"])).dropna()
     window = real[real.index > real.index[-1] - pd.DateOffset(years=10)]
+    # BIS broad real effective rate: up = stronger peso, so the sign flips to match the bilateral gap.
+    reer = _monthly(mx["reer"])
+    reer_window = reer[reer.index > reer.index[-1] - pd.DateOffset(years=10)]
+    # The BIS index is monthly and ~3 months late: carry its last value to today with the nominal move of the peso
+    # since that month (relative prices barely move in a few months).
+    fx_daily = mx["fx_usd"].dropna()
+    fx_then = fx_daily[fx_daily.index.to_period("M") == reer.index[-1].to_period("M")].mean()
+    reer_now = float(reer.iloc[-1] * fx_then / fx_daily.iloc[-1]) if pd.notna(fx_then) else float(reer.iloc[-1])
     return MexicoExtras(
         fx_usd=_last(mx["fx_usd"]),
         fx_yoy=_yoy(mx["fx_usd"]),
         carry_vs_us=mx_snap.policy_rate - us_snap.policy_rate,
         real_carry_vs_us=mx_snap.real_policy_rate - us_snap.real_policy_rate,
-        real_fx_gap=float(real.iloc[-1] / window.mean() - 1),
+        real_fx_gap=float(1 - reer_now / reer_window.mean()), reer_date=reer.index[-1].strftime("%Y-%m"),
+        real_fx_gap_bilateral=float(real.iloc[-1] / window.mean() - 1),
     )
 
 
@@ -239,6 +252,17 @@ def _yoy(series: pd.Series, months_back: int = 0) -> float:
     if pd.isna(now) or pd.isna(prior):
         raise DataError(f"not enough history for a yoy change at {end.date()}")
     return float(now / prior - 1)
+
+
+def _growth_ex_covid(series: pd.Series, years: int) -> float:
+    """Mean year-on-year growth over the last *years*, leaving out 2020-2021 so the collapse and the rebound
+    do not set the long-run trend."""
+    s = series.dropna()
+    yoy = (s / s.shift(freq=pd.DateOffset(years=1)) - 1).dropna()
+    yoy = yoy[(yoy.index > s.index[-1] - pd.DateOffset(years=years)) & ~yoy.index.year.isin([2020, 2021])]
+    if len(yoy) < 4:
+        raise DataError(f"under {years}y of growth history outside 2020-2021")
+    return float(yoy.mean())
 
 
 def _cagr(series: pd.Series, years: int) -> float:
