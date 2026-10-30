@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Panorama macro</title>
+<meta http-equiv="refresh" content="3600">
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+__CSS__
+</style>
+</head>
+<body>
+<main>
+<nav class="top" aria-label="Áreas">
+  <div class="navrow"><div id="areas" role="tablist" aria-label="Áreas"></div><button type="button" id="searchbtn" aria-label="Buscar (tecla /)">Buscar /</button></div>
+  <div id="views" role="tablist" aria-label="Vistas"></div>
+</nav>
+<div class="ranges" role="group" aria-label="Periodo de las gráficas"><span>Periodo</span>
+  <button type="button" data-r="auto" class="on">Auto</button><button type="button" data-r="1m">1M</button><button type="button" data-r="3m">3M</button>
+  <button type="button" data-r="6m">6M</button><button type="button" data-r="ytd">Año</button><button type="button" data-r="1y">1A</button>
+  <button type="button" data-r="5y">5A</button><button type="button" data-r="all">Todo</button></div>
+<div id="app"></div>
+<footer><span id="foot"></span><span>No es recomendación de inversión.</span></footer>
+</main>
+<nav id="bottom" role="tablist" aria-label="Áreas"></nav>
+<div id="search" hidden role="dialog" aria-label="Buscar"><div class="box"><input type="search" placeholder="Buscar indicador, tarjeta o vista" aria-label="Buscar"><ul id="hits"></ul></div></div>
+<div id="tip" role="presentation"></div>
+<script id="data" type="application/json">__DATA__</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+__JS__
+</script>
+</body>
+</html>
