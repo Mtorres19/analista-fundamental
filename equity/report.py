@@ -5,6 +5,7 @@ from __future__ import annotations
 from equity.dcf import Valuation
 from macro.assumptions import MarketAssumptions
 
+REGIME = {"goldilocks": "goldilocks", "reflation": "reflación", "stagflation": "estanflación", "slowdown": "desaceleración"}
 VERDICT = {"comprar": "COMPRAR", "mantener": "MANTENER", "vender": "VENDER"}
 
 
@@ -54,7 +55,8 @@ def render(v: Valuation, a: MarketAssumptions) -> str:
     peers = ", ".join(v.peers) or "sin comparables"
     return "\n".join([
         f"# {v.name} ({v.ticker}): {VERDICT[v.verdict]}", "",
-        f"Corte {v.as_of}. Cifras en {v.currency}. No es recomendación de inversión.", "",
+        f"Corte {v.as_of}. Cifras en {v.currency}"
+        + (f"; base de ingresos: últimos doce meses al {v.ttm_end}" if v.ttm_end else "") + ". No es recomendación de inversión.", "",
         f"**Valor por acción {_m(v.value_per_share)} vs precio {_m(x.price)} ({v.upside:+.1%}).**", "",
         "## Tesis", "", *[f"{i}. {t}" for i, t in enumerate(thesis(v), 1)], "",
         "## Valuación", "",
@@ -78,7 +80,7 @@ def render(v: Valuation, a: MarketAssumptions) -> str:
         "| | −5 pp | base | +5 pp |", "| --- | --- | --- | --- |", *sens, "",
         "## Riesgos", "", *[f"- {r}" for r in risks(v, a)], "",
         "## Supuestos macro", "",
-        f"Mercado {a.market} ({a.currency}), régimen {a.regime}: libre de riesgo {_p(a.risk_free_usd)}, prima de mercado "
+        f"Mercado {a.market} ({a.currency}), régimen {REGIME.get(a.regime, a.regime)}: libre de riesgo {_p(a.risk_free_usd)}, prima de mercado "
         f"{_p(a.equity_risk_premium)}, riesgo país {_p(a.country_risk_premium)}, inflación esperada {_p(a.expected_inflation)}.",
     ]) + "\n"
 

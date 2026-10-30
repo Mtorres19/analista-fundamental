@@ -4,7 +4,7 @@ import re
 import pandas as pd
 import pytest
 
-from equity.data import Financials, Market, annual_facts, regression_beta
+from equity.data import Financials, Market, annual_facts, latest_facts, regression_beta
 from equity.dcf import Inputs, default_spread, implied_growth, project, value
 from equity.report import render
 from macro.assumptions import MarketAssumptions
@@ -33,6 +33,19 @@ def test_annual_facts_keeps_full_years_from_the_latest_10k():
     s = annual_facts(units, flow=True)
     assert list(s.values) == [101, 120]
     assert list(annual_facts([{"form": "10-K", "end": "2024-12-31", "filed": "2025-02-01", "val": 7}], flow=False)) == [7]
+
+
+def test_trailing_twelve_months_from_10qs():
+    units = [
+        {"form": "10-K", "start": "2025-01-01", "end": "2025-12-31", "filed": "2026-02-01", "val": 400},
+        {"form": "10-Q", "start": "2025-01-01", "end": "2025-09-30", "filed": "2025-10-28", "val": 290},
+        {"form": "10-Q", "start": "2026-01-01", "end": "2026-09-30", "filed": "2026-10-28", "val": 330},
+        {"form": "10-Q", "start": "2026-07-01", "end": "2026-09-30", "filed": "2026-10-28", "val": 115},  # quarter alone
+    ]
+    assert latest_facts(units, pd.Timestamp("2025-12-31"), flow=True) == (440.0, "2026-09-30")
+    assert latest_facts(units[:1], pd.Timestamp("2025-12-31"), flow=True) is None
+    bal = [{"form": "10-K", "end": "2025-12-31", "val": 9}, {"form": "10-Q", "end": "2026-09-30", "filed": "2026-10-28", "val": 7}]
+    assert latest_facts(bal, pd.Timestamp("2025-12-31"), flow=False) == (7.0, "2026-09-30")
 
 
 def test_no_growth_dcf_is_a_perpetuity():
@@ -70,7 +83,9 @@ def test_default_spread_and_beta():
     assert regression_beta(idx * 2, idx) == pytest.approx(1.0)
 
 
-def test_report_is_spanish_markdown():
+def test_ttm_base_and_report_is_spanish_markdown():
+    v = value(FIN.model_copy(update={"ttm": {"revenue": 140e9}, "ttm_end": "2025-09-30"}), MKT, A, "2026-10-30")
+    assert v.inputs.revenue == 140e9 and v.ttm_end == "2025-09-30"
     text = render(value(FIN, MKT, A, "2026-10-30"), A)
     for h in ("# Test Inc (TEST):", "## Tesis", "## Valuación", "## Salud financiera", "## Sensibilidad", "## Riesgos"):
         assert h in text

@@ -79,6 +79,7 @@ class Valuation(BaseModel):
     implied_growth: float | None   # years 1-5 growth the market price implies
     sensitivity: dict[str, dict[str, float]]   # WACC shift -> growth shift -> value per share
     history: dict[str, list]    # fiscal years, revenue, margin for the report
+    ttm_end: str | None = None  # quarter end of the trailing-twelve-month base, when there is one
 
 
 def value(f: Financials, m: Market, a: MarketAssumptions, as_of: str, peers: dict | None = None,
@@ -97,6 +98,7 @@ def value(f: Financials, m: Market, a: MarketAssumptions, as_of: str, peers: dic
         comparables=comparables(f, x, peers), implied_growth=implied_growth(x), peers=peers, health=health(f),
         sensitivity={f"{dw * 100:+.0f} pp": {f"{dg * 100:+.0f} pp": round(_rerun(x, wacc=x.wacc + dw, growth=x.growth + dg), 2)
                                    for dg in (-0.05, 0.0, 0.05)} for dw in (-0.01, 0.0, 0.01)},
+        ttm_end=f.ttm_end if "revenue" in f.ttm else None,
         history={"years": f.fiscal_years, "revenue": f.items["revenue"],
                  "margin": [e / r if e is not None and r else None for e, r in zip(f.items["ebit"], f.items["revenue"])]},
     )
@@ -114,7 +116,8 @@ def inputs(f: Financials, m: Market, a: MarketAssumptions, **overrides: float) -
     net_capex = sum(c - d for c, d in zip(f.items["capex"][-n:], f.items["da"][-n:]) if c is not None and d is not None)
     stc = _clip(d_rev / net_capex, *SALES_TO_CAPITAL_CAP) if net_capex > 0 and d_rev > 0 else 2.0
 
-    debt, cash = (f.last("debt") or [0.0])[0], (f.last("cash") or [0.0])[0]
+    debt = f.ttm.get("debt", (f.last("debt") or [0.0])[0])
+    cash = f.ttm.get("cash", (f.last("cash") or [0.0])[0])
     ebit, interest = (f.last("ebit") or [0.0])[0], (f.last("interest") or [0.0])[0]
     spread = default_spread(ebit / interest if interest else float("inf"))
     # Same conversion as the cost of equity: price it in dollars, then carry it into local currency.
@@ -125,7 +128,8 @@ def inputs(f: Financials, m: Market, a: MarketAssumptions, **overrides: float) -
 
     # Terminal ROIC: today's, but no more than 5 pp over the WACC and never under it (competition erodes excess returns).
     roic = health(f)["roic"]
-    x = dict(revenue=rev[-1], growth=growth, terminal_growth=a.terminal_growth,
+    # Start from the latest twelve months (10-Qs), not a fiscal year that may be ten months old.
+    x = dict(revenue=f.ttm.get("revenue", rev[-1]), growth=growth, terminal_growth=a.terminal_growth,
              margin=statistics.mean(margins), tax_effective=_clip(statistics.mean(taxes) if taxes else marginal, 0.0, 0.4),
              tax_marginal=marginal, sales_to_capital=stc, terminal_roic=max(wacc, min(roic or wacc, wacc + 0.05)),
              cost_of_equity=ke, cost_of_debt=kd, wacc=wacc, beta=m.beta, cash=cash, debt=debt, shares=m.shares_out,

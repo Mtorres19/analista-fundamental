@@ -18,8 +18,6 @@ from macro.sources import DataError
 
 SEC_TICKERS = "https://www.sec.gov/files/company_tickers.json"
 SEC_FACTS = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
-# The SEC rejects requests without a contact; SEC_USER_AGENT overrides it.
-USER_AGENT = os.environ.get("SEC_USER_AGENT", "analista-fundamental (github.com/Mtorres19/analista-fundamental)")
 
 # Line item -> XBRL tags tried in order; the first with annual data wins. Flows sum a fiscal year, stocks are year-end.
 FLOWS = {
@@ -51,6 +49,8 @@ class Financials(BaseModel):
     fiscal_years: list[str]                 # fiscal year-end dates, oldest first
     items: dict[str, list[float | None]]    # line item -> one value per fiscal year
     source: str
+    ttm: dict[str, float] = {}              # trailing twelve months (flows) and latest balance (stocks) after the last 10-K
+    ttm_end: str | None = None
 
     def last(self, item: str, n: int = 1) -> list[float]:
         return [v for v in self.items.get(item, [])[-n:] if v is not None]
@@ -68,9 +68,42 @@ def sec_financials(ticker: str, years: int = 6) -> Financials:
     if len(ends) < 3:
         raise DataError(f"SEC {ticker}: only {len(ends)} annual revenue figures")
     pick = lambda s: [None if pd.isna(v := s.get(e)) else float(v) for e in ends]
+    ttm, ttm_end = {}, None
+    for k, tags in {**FLOWS, **STOCKS}.items():
+        for tag in tags:
+            got = latest_facts(_units(gaap, tag), ends[-1], flow=k in FLOWS)
+            if got:
+                ttm[k], end = got
+                ttm_end = max(ttm_end or end, end)
+                break
     return Financials(ticker=ticker.upper(), name=facts.get("entityName", ticker), currency="USD",
                       fiscal_years=[e.date().isoformat() for e in ends],
-                      items={k: pick(s) for k, s in {**flows, **stocks}.items()}, source="SEC EDGAR")
+                      items={k: pick(s) for k, s in {**flows, **stocks}.items()}, source="SEC EDGAR",
+                      ttm=ttm, ttm_end=ttm_end)
+
+
+def latest_facts(units: list[dict], fy_end: pd.Timestamp, flow: bool) -> tuple[float, str] | None:
+    """Value after the last fiscal year from 10-Qs: for a flow, trailing twelve months = last fiscal year + this
+    year-to-date - the same span a year earlier; for a stock, the latest quarter-end balance. None if no 10-Q since."""
+    q = [f for f in units if f.get("form") in ("10-Q", "10-Q/A") and "end" in f and pd.Timestamp(f["end"]) > fy_end]
+    if not flow:
+        if not q:
+            return None
+        f = max(q, key=lambda f: (f["end"], f.get("filed", "")))
+        return float(f["val"]), f["end"]
+    days = lambda f: (pd.Timestamp(f["end"]) - pd.Timestamp(f["start"])).days
+    ytd = [f for f in q if "start" in f and abs((pd.Timestamp(f["start"]) - fy_end).days - 1) <= 3]
+    fy = annual_facts(units, flow=True)
+    if not ytd or fy_end not in fy.index:
+        return None
+    now = max(ytd, key=lambda f: (f["end"], f.get("filed", "")))
+    year_ago = pd.Timestamp(now["end"]) - pd.DateOffset(years=1)
+    prior = [f for f in units if "start" in f and abs((pd.Timestamp(f["end"]) - year_ago).days) <= 7
+             and abs(days(f) - days(now)) <= 7]
+    if not prior:
+        return None
+    before = max(prior, key=lambda f: f.get("filed", ""))
+    return float(fy[fy_end]) + float(now["val"]) - float(before["val"]), now["end"]
 
 
 def annual_facts(units: list[dict], flow: bool) -> pd.Series:
@@ -94,11 +127,14 @@ def _annual(gaap: dict, tags: list[str], flow: bool) -> pd.Series:
     # Companies switch tags over time (Revenues -> RevenueFromContract...): fill gaps from later tags.
     out = pd.Series(dtype=float)
     for tag in tags:
-        units = gaap.get(tag, {}).get("units", {})
-        vals = units.get("USD") or units.get("shares") or []
-        s = annual_facts(vals, flow)
+        s = annual_facts(_units(gaap, tag), flow)
         out = s if out.empty else out.combine_first(s)
     return out
+
+
+def _units(gaap: dict, tag: str) -> list[dict]:
+    units = gaap.get(tag, {}).get("units", {})
+    return units.get("USD") or units.get("shares") or []
 
 
 def _cik(ticker: str) -> int:
@@ -109,8 +145,12 @@ def _cik(ticker: str) -> int:
 
 
 def _sec_json(url: str) -> dict:
+    # The SEC blocks requests whose User-Agent carries no contact (name and e-mail): it must come from the environment.
+    agent = os.environ.get("SEC_USER_AGENT")
+    if not agent:
+        raise DataError("SEC_USER_AGENT is not set: the SEC requires 'name email', e.g. 'analista-fundamental you@mail.com'")
     try:
-        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=60)
+        resp = requests.get(url, headers={"User-Agent": agent}, timeout=60)
         resp.raise_for_status()
     except requests.RequestException as exc:
         raise DataError(f"{url}: {exc}") from exc
