@@ -9,7 +9,7 @@ dependencies = ["pandas>=2.1", "requests>=2.32", "pydantic>=2.4", "yfinance>=0.2
 dev = ["pytest>=7.4"]
 
 [tool.setuptools]
-packages = ["macro"]
+packages = ["macro", "equity"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

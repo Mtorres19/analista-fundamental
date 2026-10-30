@@ -1,0 +1,29 @@
+# Lista de seguimiento: python -m equity lista
+# mercado: US (estados financieros de la SEC) o MX (Yahoo Finance). comparables: tickers de Yahoo.
+# supuestos (opcional): reemplaza los del modelo, p. ej. supuestos = { growth = 0.12, margin = 0.30 }
+# financiera = true: bancos y aseguradoras, que no se valúan con flujo libre.
+
+[GOOGL]
+mercado = "US"
+sector = "Servicios de comunicación"
+comparables = ["MSFT", "META", "AMZN", "AAPL"]
+
+[MSFT]
+mercado = "US"
+sector = "Tecnología"
+comparables = ["GOOGL", "AAPL", "ORCL", "AMZN"]
+
+[WALMEX.MX]
+mercado = "MX"
+sector = "Consumo básico"
+comparables = ["WMT", "SORIANAB.MX", "CHDRAUIB.MX"]
+
+[AMXB.MX]
+mercado = "MX"
+sector = "Servicios de comunicación"
+comparables = ["TEF", "VZ", "T", "TIMB"]
+
+[GFNORTEO.MX]
+mercado = "MX"
+sector = "Financiero"
+financiera = true
