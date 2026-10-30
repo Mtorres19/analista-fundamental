@@ -4,7 +4,7 @@ import re
 import pandas as pd
 import pytest
 
-from equity.data import Financials, Market, annual_facts, latest_facts, regression_beta
+from equity.data import Consensus, Financials, Market, annual_facts, latest_facts, regression_beta
 from equity.dcf import Inputs, default_spread, implied_growth, project, value
 from equity.report import render
 from macro.assumptions import MarketAssumptions
@@ -90,7 +90,10 @@ def test_ttm_base_and_report_is_spanish_markdown():
     assert v.ttm_end == "2025-09-30" and v.inputs.growth == pytest.approx((0.10 + 0.20) / 2, abs=1e-3)  # 3.75y at 10%, YTD 20%
     assert v.inputs.debt == 12e9
     assert v.inputs.margin == pytest.approx((31 / 121 + 35 / 133.1 + 40e9 / f.ttm["revenue"]) / 3)
-    text = render(value(FIN, MKT, A, "2026-10-30"), A)
+    c = Consensus(target_mean=380.0, target_median=375.0, target_low=300.0, target_high=450.0,
+                  ratings={"strongBuy": 5, "buy": 40, "hold": 5, "sell": 0}, revenue={"+1y": {"avg": 150e9, "growth": 0.13, "analysts": 40}})
+    text = render(value(FIN, MKT, A, "2026-10-30", consensus=c), A)
+    assert "## Contra el consenso" in text and "45 compra, 5 mantener, 0 venta" in text
     for h in ("# Test Inc (TEST):", "## Tesis", "## Valuación", "## Salud financiera", "## Sensibilidad", "## Riesgos"):
         assert h in text
     assert not re.search(r"\bnan\b", text.lower())

@@ -45,6 +45,32 @@ def risks(v: Valuation, a: MarketAssumptions) -> list[str]:
     return out
 
 
+def against_consensus(v: Valuation) -> list[str]:
+    """Analysts' targets and revenue estimates next to ours: a comparison, not an input."""
+    c, x = v.consensus, v.inputs
+    if c is None:
+        return []
+    out = ["## Contra el consenso", "",
+           "Comparación con las casas de análisis; no entra al modelo. Sus objetivos son a 12 meses; nuestro valor es de "
+           f"hoy, a 12 meses equivale a unos {_m(v.value_per_share * (1 + x.cost_of_equity))}.", ""]
+    if c.target_mean:
+        rank = "arriba" if v.value_per_share > (c.target_median or c.target_mean) else "abajo"
+        out += ["| | Valor por acción |", "| --- | --- |", f"| Nuestro DCF | {_m(v.value_per_share)} |",
+                f"| Mediana de las casas | {_m(c.target_median)} |", f"| Promedio | {_m(c.target_mean)} |",
+                f"| Rango | {_m(c.target_low)} a {_m(c.target_high)} |", "",
+                f"Quedamos {rank} de la mediana ({v.value_per_share / (c.target_median or c.target_mean) - 1:+.1%})."]
+    if c.ratings:
+        r = c.ratings
+        out.append(f"Recomendaciones: {r.get('strongBuy', 0) + r.get('buy', 0)} compra, {r.get('hold', 0)} mantener, "
+                   f"{r.get('sell', 0) + r.get('strongSell', 0)} venta.")
+    if c.revenue:
+        out += ["", "| Ingresos | Consenso | Crecimiento | Analistas |", "| --- | --- | --- | --- |"]
+        out += [f"| {'Año en curso' if k == '0y' else 'Próximo año'} | {_m(e['avg'], 0)} | {_p(e['growth'])} | {e['analysts']:.0f} |"
+                for k, e in c.revenue.items()]
+        out.append(f"Nuestro año 1: {_m(v.years[0].revenue, 0)} ({_p(v.years[0].growth)}).")
+    return out + [""]
+
+
 def render(v: Valuation, a: MarketAssumptions) -> str:
     x, h = v.inputs, v.health
     hist = [f"| {y[:4]} | {_m(r, 0)} | {_p(mg)} |" for y, r, mg in
@@ -71,7 +97,7 @@ def render(v: Valuation, a: MarketAssumptions) -> str:
         f"más caja {_m(x.cash, 0)}, menos deuda {_m(x.debt, 0)}: capital {_m(v.equity_value, 0)} entre "
         f"{x.shares / 1e6:,.0f} millones de acciones.", "",
         f"Comparables ({peers}):", "", "| Método | Valor por acción | Vs precio |", "| --- | --- | --- |", *comps, "",
-        "## Salud financiera", "",
+        *against_consensus(v), "## Salud financiera", "",
         "| Año fiscal | Ingresos | Margen operativo |", "| --- | --- | --- |", *hist, "",
         f"- Margen de flujo libre {_p(h['fcf_margin'])}; ROIC {_p(h['roic'])}; caja neta {_m(h['net_cash'], 0)}.",
         f"- Cobertura de intereses {_x(h['interest_coverage'])}; inversión {_p(h['capex_to_revenue'])} de ingresos; "

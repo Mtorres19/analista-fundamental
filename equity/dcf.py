@@ -17,7 +17,7 @@ import pandas as pd
 
 from pydantic import BaseModel
 
-from equity.data import Financials, Market
+from equity.data import Consensus, Financials, Market
 from macro.assumptions import MarketAssumptions
 
 MARGINAL_TAX = {"USD": 0.25, "MXN": 0.30}     # federal + state in the US (Damodaran's 25%); ISR in Mexico
@@ -84,10 +84,11 @@ class Valuation(BaseModel):
     sensitivity: dict[str, dict[str, float]]   # WACC shift -> growth shift -> value per share
     history: dict[str, list]    # fiscal years, revenue, margin for the report
     ttm_end: str | None = None  # quarter end of the trailing-twelve-month base, when there is one
+    consensus: Consensus | None = None
 
 
 def value(f: Financials, m: Market, a: MarketAssumptions, as_of: str, peers: dict | None = None,
-          **overrides: float) -> Valuation:
+          consensus: Consensus | None = None, **overrides: float) -> Valuation:
     """*overrides*: any Inputs field (growth, margin, sales_to_capital, terminal_roic, ...) to replace the default."""
     x = inputs(f, m, a, **overrides)
     years, tv, pv_tv, ev = project(x)
@@ -102,7 +103,7 @@ def value(f: Financials, m: Market, a: MarketAssumptions, as_of: str, peers: dic
         comparables=comparables(f, x, peers), implied_growth=implied_growth(x), peers=peers, health=health(f),
         sensitivity={f"{dw * 100:+.0f} pp": {f"{dg * 100:+.0f} pp": round(_rerun(x, wacc=x.wacc + dw, growth=x.growth + dg), 2)
                                    for dg in (-0.05, 0.0, 0.05)} for dw in (-0.01, 0.0, 0.01)},
-        ttm_end=f.ttm_end if "revenue" in f.ttm else None,
+        ttm_end=f.ttm_end if "revenue" in f.ttm else None, consensus=consensus,
         history={"years": f.fiscal_years, "revenue": f.items["revenue"],
                  "margin": [e / r if e is not None and r else None for e, r in zip(f.items["ebit"], f.items["revenue"])]},
     )

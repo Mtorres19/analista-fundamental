@@ -56,7 +56,8 @@ def _one(ticker: str, cfg: dict, macro, as_of: str, out: Path, overrides: dict) 
     fin = data.sec_financials(ticker) if market == "US" else data.yahoo_financials(ticker)
     mkt = data.market_data(ticker, BENCHMARK[market])
     a = macro.assumptions[0 if market == "US" else 1]
-    v = value(fin, mkt, a, as_of, peers=data.peers_multiples(cfg.get("comparables", [])), **{**cfg.get("supuestos", {}), **overrides})
+    v = value(fin, mkt, a, as_of, peers=data.peers_multiples(cfg.get("comparables", [])),
+              consensus=data.consensus(ticker), **{**cfg.get("supuestos", {}), **overrides})
     out.mkdir(parents=True, exist_ok=True)
     stem = out / f"{ticker.replace('.', '_')}-{as_of}"
     stem.with_suffix(".md").write_text(render(v, a))

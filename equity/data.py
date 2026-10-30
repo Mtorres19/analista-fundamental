@@ -254,6 +254,42 @@ def peers_multiples(tickers: list[str]) -> dict[str, dict[str, float | None]]:
     return out
 
 
+class Consensus(BaseModel):
+    """What the analysts say, shown next to our value for comparison only; never an input to the DCF."""
+    target_mean: float | None
+    target_median: float | None
+    target_low: float | None
+    target_high: float | None
+    ratings: dict[str, int]                 # strongBuy, buy, hold, sell, strongSell (latest month)
+    revenue: dict[str, dict[str, float]]    # '0y' / '+1y' -> {avg, growth, analysts}
+
+
+def consensus(ticker: str) -> Consensus | None:
+    import yfinance as yf
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tk = yf.Ticker(ticker)
+            t = tk.analyst_price_targets or {}
+            rec, rev = tk.recommendations_summary, tk.revenue_estimate
+    except Exception:   # a missing consensus must not stop the valuation
+        return None
+    num = lambda v: float(v) if isinstance(v, (int, float)) and v == v else None
+    ratings = ({k: int(rec.iloc[0][k]) for k in ("strongBuy", "buy", "hold", "sell", "strongSell") if k in rec.columns}
+               if rec is not None and not rec.empty else {})
+    revenue = {}
+    if rev is not None and not rev.empty:
+        for period in ("0y", "+1y"):
+            if period in rev.index and num(rev.loc[period].get("avg")):
+                row = rev.loc[period]
+                revenue[period] = {"avg": float(row["avg"]), "growth": num(row.get("growth")) or 0.0,
+                                   "analysts": num(row.get("numberOfAnalysts")) or 0.0}
+    out = Consensus(target_mean=num(t.get("mean")), target_median=num(t.get("median")), target_low=num(t.get("low")),
+                    target_high=num(t.get("high")), ratings=ratings, revenue=revenue)
+    return out if out.target_mean or out.revenue else None
+
+
 def regression_beta(stock: pd.Series, index: pd.Series) -> float:
     r = pd.concat([stock, index], axis=1).dropna().pct_change().dropna()
     if len(r) < 24:
