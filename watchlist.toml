@@ -8,6 +8,8 @@
 mercado = "US"
 sector = "Servicios de comunicación"
 comparables = ["MSFT", "META", "AMZN", "AAPL"]
+# El capex de IA (~200 mil millones en 2026) compra una pista de crecimiento más larga: 10 años de convergencia.
+supuestos = { fade_years = 10 }
 
 [MSFT]
 mercado = "US"
