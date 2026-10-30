@@ -2,8 +2,7 @@
 
 Ours is deliberately simple and transparent: the average of (a) trend real growth, the 10y CAGR of real GDP the
 snapshot already computes, and (b) the 10y average of the ex-ante real policy rate (policy minus expected
-inflation: the Cleveland Fed 1y expectation for the US; realized inflation for Mexico, which has no free daily
-expectations series). Nominal neutral = r* + the central bank's inflation target. The forecast path converges to a Taylor-type rate:
+inflation: the Cleveland Fed 1y expectation for the US; the Banxico survey's next-12-months median for Mexico). Nominal neutral = r* + the central bank's inflation target. The forecast path converges to a Taylor-type rate:
 nominal neutral + 0.5 x (inflation - target) + 0.5 x output gap, the gap read from unemployment (Okun: one point of
 unemployment above its long-run level ~ two points of output below potential). Rates in percent.
 
@@ -70,9 +69,10 @@ def build_neutral(r: MacroReport, fetch: sources.Fetch = sources.fetch) -> dict[
     us, mx = sources.load("US", as_of, fetch), sources.load("MX", as_of, fetch)
     exp_us = _monthly(sources.load("US_ECON", as_of, fetch)["inflation_exp_1y"])
     hlw = sources.load("EXTERNAL", as_of, fetch)["hlw_rstar_us"]
-    infl_mx = (_monthly(mx["cpi"]) / _monthly(mx["cpi"]).shift(freq=pd.DateOffset(years=1)) - 1).dropna() * 100
+    cons = sources.load("CONSENSUS", as_of, fetch)
+    infl_mx = _monthly(cons["mx_infl_12m"])
     out = {}
-    u_star = {"US": float(sources.load("CONSENSUS", as_of, fetch)["us_unemp_lr"].iloc[-1]),
+    u_star = {"US": float(cons["us_unemp_lr"].iloc[-1]),
               "MX": float(_monthly(mx["unemployment"]).iloc[-120:].mean())}
     for c, s, expected, snap, ext, label in (
             ("US", us, exp_us, r.us, float(hlw.iloc[-1]), f"NY Fed HLW {hlw.index[-1].year}T{(hlw.index[-1].month - 1) // 3 + 1}"),

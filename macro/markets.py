@@ -156,6 +156,7 @@ class Markets(BaseModel):
     mx_policy_gap: float        # 364d CETES minus the Banxico rate
     mx_us_spread: dict[str, float]
     mx_spread_10y: float
+    mx_real_spread_10y: float | None   # Udibono 10y minus TIPS 10y: the spread net of inflation and peso premia
     slopes: dict[str, list[list]]   # history for the chart: 2s10s, 3m10y, recession probability
 
     @property
@@ -228,6 +229,7 @@ def build_markets(r: MacroReport, fetch: sources.Fetch = sources.fetch) -> Marke
         us_policy_gap=us_curve.at("2y") - r.us.policy_rate * 100,
         mx_policy_gap=mx_curve.at("364d") - r.mx.policy_rate * 100,
         mx_us_spread=spread, mx_spread_10y=mx_curve.at("10y") - us_curve.at("10y"),
+        mx_real_spread_10y=(self_real.at("10y") - real["10y"]) if self_real.at("10y") is not None and "10y" in real else None,
         slopes={"2s10s": _pts(hist(s2s10)), "3m10y": _pts(hist(s3m10y)), "prob": _pts(prob)},
     )
 
@@ -273,14 +275,23 @@ def reasons(m: Markets, r: MacroReport) -> dict[str, list[str]]:
                   else "el peso le resta al inversionista en dólares.")
                + f" México está en {regime[r.mx.regime]}.")
     crp = r.assumptions[1].country_risk_premium * 100
-    out.append(f"El bono a 10 años de México paga {m.mx_spread_10y:.2f} pp sobre el Treasury; nuestro riesgo país en la "
-               f"valuación es {crp:.2f} pp. " + ("El supuesto es más exigente que el mercado: conservador."
-                                                   if crp >= m.mx_spread_10y else
-                                                   "El mercado pide más que nuestro supuesto: la valuación podría ser optimista."))
+    out.append(country_risk_text(m, crp))
     worst = min(m.indices, key=lambda i: i.drawdown)
     out.append(f"El índice más lejos de su máximo de 52 semanas es {worst.name} ({worst.drawdown:.1%}); "
                f"el más volátil a 3 meses es {max(m.indices, key=lambda i: i.vol_3m).name}.")
     return {"Curvas": curves, "Mercados": out}
+
+
+def country_risk_text(m: Markets, crp: float) -> str:
+    """Our country-risk premium against the market's real spread. The nominal 10y spread also pays Mexico's higher
+    inflation and the peso's risk, which the valuation prices separately, so it is not the comparison."""
+    head = (f"El bono a 10 años de México paga {m.mx_spread_10y:.2f} pp sobre el Treasury en términos nominales, pero buena parte es "
+            "inflación y prima cambiaria. ")
+    if m.mx_real_spread_10y is None:
+        return head + f"Sin Udibono a 10 años reciente no hay spread real que comparar con nuestro riesgo país ({crp:.2f} pp)."
+    return head + (f"En términos reales (Udibono − TIPS) el diferencial es {m.mx_real_spread_10y:.2f} pp, y nuestro riesgo país en la "
+                   f"valuación es {crp:.2f} pp: " + ("más exigente que el mercado, conservador." if crp >= m.mx_real_spread_10y
+                                                      else "menos de lo que pide el mercado, la valuación podría ser optimista."))
 
 
 def _index(name: str, s: pd.Series, currency: str, coe: float) -> IndexStats:

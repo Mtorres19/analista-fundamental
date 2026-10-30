@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from functools import cache
 
 import numpy as np
@@ -51,7 +52,7 @@ def build_dashboard(as_of: str, erp: float | None = None, fetch: sources.Fetch =
     charts, forecasts = {}, []
 
     def add(key, title, unit, hist, freq="MS", imf=None, extra=(), market=None, anchor=None, chart=True, daily=None,
-            outside=None, sigma12=None):
+            outside=None, sigma12=None, auto_from=None):
         """anchor: (label, index -> Series), a path the macro side implies (Taylor rate, cost of equity).
         outside: (label, Series by date), the market's or the consensus's path (futures, expectations, survey);
         when given, the headline forecast is the average of our AR model and it, and our two pure models stay drawn.
@@ -71,6 +72,9 @@ def build_dashboard(as_of: str, erp: float | None = None, fetch: sources.Fetch =
             charts[key] = _chart(title, unit, hist if daily is None else _recent(daily.dropna(), 5), fc, imf, extra,
                                  anchor[0] if anchor else None, outside[0] if outside else None)
             charts[key]["daily"] = daily is not None
+            charts[key]["freq"] = freq
+            # Default window start (the GDP charts skip the 2020 collapse, which flattens the rest).
+            charts[key]["auto_from"] = int(pd.Timestamp(auto_from).timestamp() * 1000) if auto_from else None
         end = fc.iloc[-1]
         forecasts.append({"name": title, "unit": unit, "now": float(hist.iloc[-1]), "drift": end.drift,
                           "ar1": end.ar1, "lo": end.lo, "hi": end.hi, "ensemble": end.ensemble,
@@ -110,10 +114,10 @@ def build_dashboard(as_of: str, erp: float | None = None, fetch: sources.Fetch =
             sigma12=rates.horizons[c]["12m"]["sigma"])
         add(f"{c}_unemp", f"Desempleo {name}", "%", _recent(_monthly(d["unemployment"])))
         gdp = d["gdp"].resample("QS").last().dropna()
-        add(f"{c}_gdp", f"PIB real anual {name}", "%", _recent(_yoy_pct(gdp)), "QS", imf=imf_g)
-    g, dly = s["GLOBAL"], s["DAILY"]
+        add(f"{c}_gdp", f"PIB real anual {name}", "%", _recent(_yoy_pct(gdp)), "QS", imf=imf_g, auto_from="2022-01-01")
+    g = s["GLOBAL"]
     for key, title, ser in (("MX_fx", "Pesos por dólar", s["MX"]["fx_usd"]), ("brent", "Petróleo Brent (USD/barril)", g["brent"]),
-                            ("copper", "Cobre (USD/libra, futuro COMEX)", dly["copper"]),
+                            ("copper", "Cobre (USD/libra, futuro COMEX)", g["copper"]),
                             ("dollar", "Dólar amplio (índice)", g["dollar"]), ("vix", "VIX (miedo del mercado)", g["vix"])):
         fut = {"brent": "BZ.NYM", "copper": "HG.CMX"}.get(key)
         add(key, title, "", _recent(_monthly(ser)), daily=ser,
@@ -127,7 +131,7 @@ def build_dashboard(as_of: str, erp: float | None = None, fetch: sources.Fetch =
 
     growth = sorted(r.world.growth.items(), key=lambda kv: -kv[1])
     data = {
-        "as_of": r.as_of, "generated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "as_of": r.as_of, "generated": datetime.now(ZoneInfo("America/Mexico_City")).strftime("%Y-%m-%d %H:%M") + " (hora de Ciudad de México)",
         "headline": {"Mundo": r.world.cycle, "EE.UU.": r.us.regime, "México": r.mx.regime},
         "regimes": [{"name": n, "regime": c.regime, "x": round((c.gdp_yoy - c.gdp_trend) * 100, 2),
                      "y": round((c.inflation_yoy - c.inflation_yoy_6m_ago) * 100, 2)}
@@ -271,7 +275,7 @@ def _kpis(r: MacroReport, m: Markets, n: dict[str, Neutral]) -> dict[str, list[d
         return {"label": label, "value": value, "sub": sub, "tone": tone}
 
     def country(s: CountrySnapshot, cmp):
-        return [k("Régimen", s.regime, "crecimiento vs tendencia × inflación",
+        return [k("Régimen", REGIME_ES[s.regime], "crecimiento vs tendencia × inflación",
                   {"goldilocks": "good", "stagflation": "bad"}.get(s.regime, "neutral")),
                 k("PIB real anual", _p(s.gdp_yoy), f"tendencia {_p(s.gdp_trend)} · FMI {_p(cmp.gdp_imf)}",
                   "good" if s.gdp_yoy >= s.gdp_trend else "bad"),
@@ -286,7 +290,8 @@ def _kpis(r: MacroReport, m: Markets, n: dict[str, Neutral]) -> dict[str, list[d
 
     w, e = r.world, r.mx_extras
     mx = country(r.mx, r.vs_imf[1]) + [
-        k("Peso por dólar", f"{e.fx_usd:.2f}", f"{_p(e.fx_yoy)} anual · real (BIS) vs 10a {_p(e.real_fx_gap)}"),
+        k("Peso por dólar", f"{e.fx_usd:.2f}", f"FIX · {_p(e.fx_yoy)} anual · real vs 10a {_p(e.real_fx_gap)} "
+          f"(BIS {e.reer_date}, llevado a hoy con el FIX)"),
         k("Carry vs EE.UU.", _p(e.carry_vs_us), f"real {_p(e.real_carry_vs_us)}",
           "good" if e.real_carry_vs_us >= 0.01 else "bad")]
     return {
@@ -352,26 +357,37 @@ def _markets_payload(m: Markets) -> dict:
                      {"label": "Tasa real 10a", "value": f"{m.us_real['10y']:.2f}%", "sub": "TIPS, EE.UU.",
                       "tone": "bad" if m.us_real["10y"] > 2 else "neutral"},
                      {"label": "Mercado vs Fed", "value": f"{m.us_policy_gap:+.2f} pp", "sub": "bono 2a menos tasa Fed"},
-                     {"label": "Spread MX–EE.UU. 10a", "value": f"{m.mx_spread_10y:.2f} pp", "sub": "bono M menos Treasury"},
+                     {"label": "Spread MX–EE.UU. 10a", "value": f"{m.mx_spread_10y:.2f} pp",
+                      "sub": f"nominal · real (Udibono − TIPS) {m.mx_real_spread_10y:.2f} pp" if m.mx_real_spread_10y is not None else "nominal"},
                      {"label": "Curva México", "value": f"{m.mx_28d10y:+.2f} pp", "sub": "bono 10a menos CETES 28d",
                       "tone": "bad" if m.mx_28d10y < 0 else "neutral"}]}
 
 
+def _dia(d: pd.Timestamp) -> str:
+    return f"{d.day} {'ene feb mar abr may jun jul ago sep oct nov dic'.split()[d.month - 1]}"
+
+
 def _rate_reasons(x: RatesOutlook, n: dict[str, Neutral], r: MacroReport) -> list[str]:
-    f0, f_last = x.fed[0], x.fed[-1]
+    f0 = x.fed[0]
     h_us, h_mx = x.horizons["US"]["12m"], x.horizons["MX"]["12m"]
+    up = lambda h: h["buckets"][1] + h["buckets"][2]
+    down = lambda h: h["buckets"][-1] + h["buckets"][-2]
     out = [f"Fed: los futuros de Fed funds dan {f0['p_hike']:.0%} de probabilidad de alza, {f0['p_hold']:.0%} de mantener y "
            f"{f0['p_cut']:.0%} de recorte en la reunión del {f0['date']:%d-%m-%Y}, con tasa esperada de {f0['expected']:.2f}% "
-           f"(hoy {x.fed_current:.2f}%). Para el {f_last['date']:%d-%m-%Y} descuentan {f_last['expected']:.2f}%: "
-           f"{f_last['cum'][1] + f_last['cum'][2]:.0%} de probabilidad de terminar arriba de hoy y {f_last['cum'][-1] + f_last['cum'][-2]:.0%} abajo.",
+           f"(hoy {x.fed_current:.2f}%). A 12 meses los futuros esperan {h_us['mean']:.2f}%; con la volatilidad de las opciones "
+           f"(MOVE) eso es {up(h_us):.0%} de probabilidad de terminar arriba de hoy, {h_us['buckets'][0]:.0%} sin cambio y "
+           f"{down(h_us):.0%} abajo. Más allá de dos reuniones usamos esta distribución y no el método de reunión por reunión, "
+           "que no tiene en cuenta la incertidumbre.",
            f"Nuestra regla de Taylor pide {n['US'].taylor:.2f}% para la Fed; el mercado espera más alzas que la regla, "
-           f"porque ve la inflación ({r.us.inflation_yoy * 100:.1f}%) por encima de la meta por más tiempo." if f_last["expected"] > n["US"].taylor + 0.25 else
+           f"porque ve la inflación ({r.us.inflation_yoy * 100:.1f}%) por encima de la meta por más tiempo." if h_us["mean"] > n["US"].taylor + 0.25 else
            f"Nuestra regla de Taylor pide {n['US'].taylor:.2f}% para la Fed, en línea con lo que descuentan los futuros."]
     if x.mx_meetings:
         m0 = x.mx_meetings[0]
         out.append(f"Banxico: la curva de Cetes, descontando su prima por plazo histórica, da {m0['p_hold']:.0%} de mantener, "
                    f"{m0['p_cut']:.0%} de recorte y {m0['p_hike']:.0%} de alza el {m0['date']:%d-%m-%Y}. No hay futuros ni opciones "
-                   "de TIIE gratuitos (MexDer es de pago), así que esta lectura es aproximada; el pronóstico la promedia con la encuesta de Banxico.")
+                   "de TIIE gratuitos (MexDer es de pago), así que esta lectura es aproximada; el pronóstico la promedia con la encuesta de Banxico. "
+                   f"Que noviembre se vea casi seguro sin cambio y a 12 meses la curva apunte a {h_mx['mean']:.2f}% no se contradice: "
+                   "el mercado no espera mover la tasa ya, sino más adelante, y los plazos largos de Cetes traen además prima por plazo.")
     out.append(f"Volatilidad: el MOVE (opciones de Treasuries) está en {x.move:.0f} pb al año. Con él la tasa de la Fed a 12 meses tiene "
                f"una media de {h_us['mean']:.2f}% y una desviación de {h_us['sigma']:.2f} pp; la de Banxico, {h_mx['mean']:.2f}% ± {h_mx['sigma']:.2f} pp "
                "(escalada por la volatilidad observada de los Cetes, sin opciones gratuitas en México). Esas son las bandas de los pronósticos de tasas.")
@@ -414,9 +430,15 @@ def _rates_payload(x: RatesOutlook, r: MacroReport) -> dict:
     a_us, a_mx = r.assumptions
     row = lambda m: {"date": m["date"].strftime("%Y-%m-%d"), "expected": m["expected"], "change": m["change"],
                      "p_cut": m["p_cut"], "p_hold": m["p_hold"], "p_hike": m["p_hike"], "cum": {str(k): v for k, v in m["cum"].items()}}
+    def horizon(c, h, now):
+        v = x.horizons[c][h]
+        b = v["buckets"]
+        return {"date": {"3m": "3 meses", "6m": "6 meses", "12m": "12 meses"}[h], "expected": v["mean"], "change": v["mean"] - now,
+                "p_cut": b[-2] + b[-1], "p_hold": b[0], "p_hike": b[1] + b[2], "cum": {str(k): p for k, p in b.items()}, "horizon": True}
+    hz = lambda c, now: [horizon(c, h, now) for h in ("3m", "6m", "12m")]
     return {
-        "fed_current": x.fed_current, "fed": [row(m) for m in x.fed], "mx_current": x.mx_current,
-        "mx": [row(m) for m in x.mx_meetings], "mx_premium": x.mx_premium, "sofr": x.sofr_check,
+        "fed_current": x.fed_current, "fed": [row(m) for m in x.fed[:2]] + hz("US", x.fed_current), "mx_current": x.mx_current,
+        "mx": [row(m) for m in x.mx_meetings] + hz("MX", x.mx_current), "mx_premium": x.mx_premium, "sofr": x.sofr_check,
         "horizons": {c: {h: {"mean": v["mean"], "sigma": v["sigma"], "buckets": {str(k): b for k, b in v["buckets"].items()}}
                          for h, v in hs.items()} for c, hs in x.horizons.items()},
         "move": x.move, "vix": x.vix, "skew": x.spy_skew, "p_down10": x.p_spx_down10, "usdmxn_vol": x.usdmxn_vol,
@@ -434,13 +456,14 @@ def _summary(r: MacroReport, m: Markets, n: dict[str, Neutral], x: RatesOutlook)
          "tone": "bad" if m.recession_prob >= 0.3 else "good"},
         {"label": "Fed vs neutral", "value": f"{n['US'].gap:+.2f} pp", "sub": f"postura {n['US'].stance}", "tone": tone(n["US"])},
         {"label": "Banxico vs neutral", "value": f"{n['MX'].gap:+.2f} pp", "sub": f"postura {n['MX'].stance}", "tone": tone(n["MX"])},
-        {"label": f"Fed {x.fed[0]['date']:%d-%b}: alza", "value": f"{x.fed[0]['p_hike'] * 100:.0f}%",
+        {"label": f"Fed {_dia(x.fed[0]['date'])}: alza", "value": f"{x.fed[0]['p_hike'] * 100:.0f}%",
          "sub": f"mantener {x.fed[0]['p_hold'] * 100:.0f}% · recorte {x.fed[0]['p_cut'] * 100:.0f}% (futuros)"},
-        {"label": f"Banxico {x.mx_meetings[0]['date']:%d-%b}: mantener" if x.mx_meetings else "Banxico",
+        {"label": f"Banxico {_dia(x.mx_meetings[0]['date'])}: mantener" if x.mx_meetings else "Banxico",
          "value": f"{x.mx_meetings[0]['p_hold'] * 100:.0f}%" if x.mx_meetings else "—",
          "sub": (f"recorte {x.mx_meetings[0]['p_cut'] * 100:.0f}% · alza {x.mx_meetings[0]['p_hike'] * 100:.0f}% (curva de Cetes)"
                  if x.mx_meetings else "sin reunión con fecha confirmada")},
-        {"label": "Spread MX–EE.UU. 10a", "value": f"{m.mx_spread_10y:.2f} pp", "sub": "riesgo país de mercado"},
+        {"label": "Spread real MX–EE.UU. 10a", "value": f"{m.mx_real_spread_10y:.2f} pp" if m.mx_real_spread_10y is not None else "—",
+         "sub": f"Udibono − TIPS; nominal {m.mx_spread_10y:.2f} pp · riesgo país usado {r.assumptions[1].country_risk_premium * 100:.2f} pp"},
         {"label": "S&P 500 en el año", "value": f"{by['S&P 500'].ytd * 100:+.1f}%", "sub": f"12m {by['S&P 500'].r1y * 100:+.1f}%"},
         {"label": "IPC en el año", "value": f"{by['IPC México'].ytd * 100:+.1f}%", "sub": f"en dólares {m.ipc_usd.ytd * 100:+.1f}%"},
     ]
@@ -530,9 +553,12 @@ def _specs(m: Markets, n: dict[str, Neutral], e: Economy, x: RatesOutlook) -> di
         "credit": {"kind": "time", "daily": True, "unit": " pp", "series": [{"label": "Corporativos emergentes (OAS)", "color": "s1", "points": flat("em_oas")},
                                                               {"label": "High yield EE.UU. (OAS)", "color": "s2", "points": flat("hy_oas")}]},
     }
-    spec["fed_probs"] = _stack([f"{r['date']:%d-%b-%y}" for r in x.fed], [{str(k): v for k, v in r["cum"].items()} for r in x.fed])
+    near = x.fed[:2]  # meeting by meeting only for the next two; horizons from the option-implied distribution
+    spec["fed_probs"] = _stack([_dia(r['date']) for r in near] + ["3 meses", "6 meses", "12 meses"],
+                               [{str(k): v for k, v in r["cum"].items()} for r in near]
+                               + [{str(k): v for k, v in x.horizons["US"][h]["buckets"].items()} for h in ("3m", "6m", "12m")])
     mx_rows = [{str(k): v for k, v in r["cum"].items()} for r in x.mx_meetings]
-    spec["mx_probs"] = _stack([f"{r['date']:%d-%b-%y}" for r in x.mx_meetings] + ["3 meses", "6 meses", "12 meses"],
+    spec["mx_probs"] = _stack([_dia(r['date']) for r in x.mx_meetings] + ["3 meses", "6 meses", "12 meses"],
                               mx_rows + [{str(k): v for k, v in x.horizons["MX"][h]["buckets"].items()} for h in ("3m", "6m", "12m")])
     spec["us_dist"] = _stack(["3 meses", "6 meses", "12 meses"], [{str(k): v for k, v in x.horizons["US"][h]["buckets"].items()} for h in ("3m", "6m", "12m")])
     spec["vix_term"] = {"kind": "cat", "unit": "", "labels": ["9 días", "1 mes", "3 meses", "6 meses"],
@@ -695,7 +721,7 @@ th { font: 500 11px/1.2 var(--mono); letter-spacing: .08em; text-transform: uppe
 tbody tr { transition: background .2s; }
 tbody tr:hover { background: rgba(255,255,255,.025); }
 td.strong { color: var(--ink); font-weight: 500; }
-.range { position: relative; width: 180px; height: 22px; }
+.range { position: relative; width: 130px; height: 22px; }
 .range .bar { position: absolute; top: 8px; height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--s1) 45%, transparent); }
 .range .mk { position: absolute; top: 3px; width: 2px; height: 16px; border-radius: 1px; transform: translateX(-1px); }
 .range .now { background: var(--ink); } .range .ens { background: var(--s3); width: 8px; height: 8px; top: 7px; border-radius: 50%; transform: translateX(-4px); box-shadow: 0 0 0 2px var(--card); }
@@ -722,7 +748,7 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--grid);
   .dot-pulse { animation: pulse 2.4s ease-out infinite; transform-box: fill-box; transform-origin: center; }
   @keyframes pulse { 0% { transform: scale(1); opacity: .55; } 80%, 100% { transform: scale(3.2); opacity: 0; } }
 }
-.ranges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -16px 0 18px; font: 500 11px/1 var(--mono); color: var(--muted);
+.ranges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 18px; font: 500 11px/1 var(--mono); color: var(--muted);
   letter-spacing: .08em; text-transform: uppercase; }
 .ranges span { margin-right: 4px; }
 .ranges button { font: 500 12px/1 var(--mono); color: var(--ink-2); background: transparent; border: 1px solid var(--ring); border-radius: 999px;
@@ -745,7 +771,16 @@ footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--grid);
   .spark path.l { stroke-dasharray: 1; animation: dash 1.6s var(--ease) both; animation-delay: calc(var(--i, 0) * 80ms); }
   @keyframes dash { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
 }
-@media (max-width: 860px) { .hero, .split { grid-template-columns: minmax(0, 1fr); } }
+table.compact th, table.compact td { padding: 9px 7px; }
+tr.hz td { color: var(--ink-2); }
+tr.hz:first-of-type td, tr:not(.hz) + tr.hz td { border-top: 1px solid var(--axis); }
+.stamp { font: 500 10.5px/1.2 var(--mono); color: var(--muted); margin-top: 6px; }
+.stamp.stale { color: var(--warn); }
+@media (max-width: 860px) {
+  .hero, .split { grid-template-columns: minmax(0, 1fr); }
+  .hide-sm { display: none; }
+  nav .row { -webkit-mask-image: linear-gradient(90deg, #000 85%, transparent); mask-image: linear-gradient(90deg, #000 85%, transparent); }
+}
 @media (max-width: 480px) { .tile .v { font-size: 24px; } .chart { height: 210px; } main { padding-block: 24px 56px; } }
 </style>
 </head>
@@ -812,6 +847,20 @@ const status = t => !t || t === 'neutral' ? '' : `<span class="status ${t}"><i a
 // Bold the figures (decimals or percentages), not plain counts like "12 meses" or "S&P 500".
 const emph = s => esc(s).replace(/(^|[^\\w.])([+-]?\\d+(?:\\.\\d+%?|%))(?![\\w])/g, '$1<b>$2</b>');
 
+// "Último dato" under each chart: amber when older than the series' normal publication lag allows.
+function stamp(ms, freq) {
+  if (!ms) return '';
+  const age = (Date.parse(D.as_of) - ms) / 864e5, stale = age > ({D: 6, MS: 100, QS: 220}[freq] || 100);  // monthly data normally lands 1-2 months after the month
+  return `<div class="stamp${stale ? ' stale' : ''}">último dato: ${new Date(ms).toISOString().slice(0, 10)}${stale ? ' · atrasado' : ''}</div>`;
+}
+function chartStamp(key) {
+  const c = D.charts[key];
+  if (c) { const h = c.lines.find(l => l.role === 'hist').points; return stamp(h[h.length - 1][0], c.daily ? 'D' : c.freq); }
+  const sp = D.specs[key];
+  if (sp && sp.kind === 'time') return stamp(Math.max(...sp.series[0].points.map(p => p[0])), sp.daily ? 'D' : 'MS');
+  return sp && sp.kind === 'tenor' ? stamp(Date.parse(D.as_of), 'D') : '';
+}
+
 // Hero
 const H = D.headline;
 document.getElementById('headline').innerHTML =
@@ -874,13 +923,13 @@ for (const [id, name, sub, keys, g20] of SECTIONS) {
   for (const k of keys) {
     const c = D.charts[k], extras = c.lines.filter(l => l.role.startsWith('extra'));
     html += `<div class="card"><h3>${esc(c.title)}</h3><div class="chart"><canvas id="c_${k}" role="img" aria-label="${esc(c.title)}"></canvas></div>` +
-      (extras.length ? `<div class="legend">${[{role: 'hist', label: c.title}].concat(extras).map(l => `<span>${swatch(l.role)}${esc(l.label)}</span>`).join('')}</div>` : '') + '</div>';
+      (extras.length ? `<div class="legend">${[{role: 'hist', label: c.title}].concat(extras).map(l => `<span>${swatch(l.role)}${esc(l.label)}</span>`).join('')}</div>` : '') + chartStamp(k) + '</div>';
   }
   html += '</div></div></section>';
 }
 // Markets
 const MK = D.markets;
-const ixChart = ix => `<div class="card"><h3>${esc(ix.name)}</h3><p class="note">Cierre diario en ${ix.currency}; modelos y rentabilidad exigida a 12 meses.</p><div class="chart"><canvas id="c_ix_${esc(ix.name)}" role="img" aria-label="${esc(ix.name)}"></canvas></div></div>`;
+const ixChart = ix => `<div class="card"><h3>${esc(ix.name)}</h3><p class="note">Cierre diario en ${ix.currency}; modelos y rentabilidad exigida a 12 meses.</p><div class="chart"><canvas id="c_ix_${esc(ix.name)}" role="img" aria-label="${esc(ix.name)}"></canvas></div>${chartStamp('ix_' + ix.name)}</div>`;
 const delta = v => `<span class="${v >= 0 ? 'up' : 'down'}">${v >= 0 ? '▲' : '▼'} ${Math.abs(v * 100).toFixed(1)}%</span>`;
 function spark(pts) {
   const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]), x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
@@ -899,7 +948,7 @@ const why = (title, list) => `<div class="why"><h3>${title}</h3><ol>${list.map(r
 const tiles = list => '<div class="tiles">' + list.map((k, i) => `<div class="tile rise" style="--i:${i}"><div class="l">${esc(k.label)}</div>` +
   `<div class="v" data-count="${esc(k.value)}">${esc(k.value)}</div><div class="s">${esc(k.sub)}</div>${status(k.tone)}</div>`).join('') + '</div>';
 const card = (key, title, note, legend = true) => `<div class="card"><h3>${title}</h3>${note ? `<p class="note">${note}</p>` : ''}` +
-  `<div class="chart"><canvas id="c_${key}" role="img" aria-label="${esc(title)}"></canvas></div>` +
+  `<div class="chart"><canvas id="c_${key}" role="img" aria-label="${esc(title)}"></canvas></div>` + chartStamp(key) +
   (legend && D.specs[key] && D.specs[key].series.length > 1 ? `<div class="legend">${D.specs[key].series.map(x => `<span>${D.specs[key].stacked ? `<svg width="12" height="12" aria-hidden="true"><rect width="12" height="12" rx="2" fill="${SLOT(x.color)}"/></svg>` : x.dots ? `<svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4" fill="${SLOT(x.color)}"/></svg>` : line(x.color, x.dash)}${esc(x.label)}</span>`).join('')}</div>` : '') + '</div>';
 const SLOT = k => k === 'muted' ? 'rgba(195,194,183,.55)' : C[k];
 const line = (k, dash = []) => `<svg width="22" height="6" aria-hidden="true"><line x1="1" y1="3" x2="21" y2="3" stroke="${SLOT(k)}" stroke-width="2" stroke-linecap="round" stroke-dasharray="${(dash || []).join(' ')}"/></svg>`;
@@ -918,36 +967,36 @@ html += sec('curvas', 'Curvas y tasas', 'Curvas nominales y reales, pendiente, r
   ${card('prob', 'Probabilidad de recesión a 12 meses', 'Probit de la Fed de Nueva York sobre la pendiente 10a – 3m. La línea punteada marca 30%.')}
   </div></div>
   <h3 class="sub-h">Tasa neutral</h3>
-  <div class="card table-wrap" style="margin-top:14px"><table><thead><tr><th>País</th><th>r* nuestro</th><th>Crec. tendencial</th><th>Tasa real ex ante 10a</th>
-  <th>Referencia externa</th><th>Meta</th><th>Neutral nominal</th><th>Tasa actual</th><th>Brecha</th><th>Postura</th></tr></thead><tbody>` +
-  NR.map(x => `<tr><td>${x.country}</td><td class="strong">${x.rstar.toFixed(2)}%</td><td>${x.growth.toFixed(2)}%</td><td>${x.avg_real.toFixed(2)}%</td>
-  <td>${x.external.toFixed(2)}% <span style="color:var(--muted)">${esc(x.external_label)}</span></td><td>${x.target.toFixed(0)}%</td>
+  <div class="card table-wrap" style="margin-top:14px"><table class="compact"><thead><tr><th>País</th><th>r* nuestro</th><th class="hide-sm">Crec. tendencial</th><th class="hide-sm">Tasa real ex ante 10a</th>
+  <th class="hide-sm">Referencia externa</th><th class="hide-sm">Meta</th><th>Neutral nominal</th><th>Tasa actual</th><th>Brecha</th><th>Postura</th></tr></thead><tbody>` +
+  NR.map(x => `<tr><td>${x.country}</td><td class="strong">${x.rstar.toFixed(2)}%</td><td class="hide-sm">${x.growth.toFixed(2)}%</td><td class="hide-sm">${x.avg_real.toFixed(2)}%</td>
+  <td class="hide-sm">${x.external.toFixed(2)}% <span style="color:var(--muted)">${esc(x.external_label)}</span></td><td class="hide-sm">${x.target.toFixed(0)}%</td>
   <td class="strong">${x.nominal.toFixed(2)}%</td><td>${x.policy.toFixed(2)}%</td><td class="strong">${x.gap >= 0 ? '+' : ''}${x.gap.toFixed(2)} pp</td><td>${x.stance}</td></tr>`).join('') +
   `</tbody></table><p class="note" style="margin-top:10px">r* nuestro: promedio del crecimiento tendencial (10 años de PIB real) y de la tasa real ex ante de 10 años (tasa de política menos inflación esperada a un año en EE.UU., inflación observada en México). Neutral nominal = r* + meta de inflación. Brecha arriba de 0.75 pp: restrictiva; abajo de −0.75 pp: laxa.</p></div>
-  <div class="charts" style="margin-top:14px">${card('rstar_US', 'Tasa real ex ante vs r*, EE.UU.', 'Fed funds menos inflación esperada a un año (Fed de Cleveland).')}${card('rstar_MX', 'Tasa real ex ante vs r*, México', 'Tasa Banxico menos inflación anual.')}</div>`);
+  <div class="charts" style="margin-top:14px">${card('rstar_US', 'Tasa real ex ante vs r*, EE.UU.', 'Fed funds menos inflación esperada a un año (Fed de Cleveland).')}${card('rstar_MX', 'Tasa real ex ante vs r*, México', 'Tasa Banxico menos la inflación esperada a 12 meses (encuesta de Banxico).')}</div>`);
 
 // Markets
 html += sec('mercados', 'Mercados', 'Índices y lo que les dice la macro',
   `<div class="ixgrid">${MK.indices.concat([MK.ipc_usd]).map(ixCard).join('')}</div>
-  <div class="split">${why('Qué dicen los mercados', D.reasons['Mercados'])}<div class="charts">
-  ${MK.indices.slice(0, 2).map(ixChart).join('')}</div></div>
-  <div class="charts" style="margin-top:14px">${MK.indices.slice(2).map(ixChart).join('')}</div>`);
+  <div style="margin-top:14px">${why('Qué dicen los mercados', D.reasons['Mercados'])}</div>
+  <div class="charts" style="margin-top:14px">${MK.indices.map(ixChart).join('')}</div>`);
 
 // Rate probabilities
 const RT = D.rates, pc = v => (v * 100).toFixed(0) + '%';
-const probRow = r => `<tr><td>${r.date}</td><td class="strong">${r.expected.toFixed(2)}%</td><td>${r.change >= 0 ? '+' : ''}${(r.change * 100).toFixed(0)} pb</td>
-  <td>${pc(r.p_cut)}</td><td>${pc(r.p_hold)}</td><td>${pc(r.p_hike)}</td>${['-2', '-1', '0', '1', '2'].map(k => `<td>${pc(r.cum[k])}</td>`).join('')}</tr>`;
-const probTable = (rows, note) => `<div class="card table-wrap"><table><thead><tr><th>Reunión</th><th>Tasa esperada</th><th>Cambio vs hoy</th>
-  <th>Recorte en la reunión</th><th>Mantener</th><th>Alza en la reunión</th><th>Acum. −50 pb o más</th><th>−25 pb</th><th>Sin cambio</th><th>+25 pb</th><th>+50 pb o más</th></tr></thead>
-  <tbody>${rows.map(probRow).join('')}</tbody></table><p class="note" style="margin-top:10px">${note}</p></div>`;
+// Wide tables keep the key columns on phones: the cumulative buckets hide below 860px.
+const probRow = r => `<tr${r.horizon ? ' class="hz"' : ''}><td>${r.date}</td><td class="strong">${r.expected.toFixed(2)}%</td><td class="hide-sm">${r.change >= 0 ? '+' : ''}${(r.change * 100).toFixed(0)} pb</td>
+  <td>${pc(r.p_cut)}</td><td>${pc(r.p_hold)}</td><td>${pc(r.p_hike)}</td>${['-2', '-1', '0', '1', '2'].map(k => `<td class="hide-sm">${pc(r.cum[k])}</td>`).join('')}</tr>`;
+const probTable = (rows, note) => `<div class="card table-wrap"><table class="compact"><thead><tr><th>Reunión u horizonte</th><th>Tasa esperada</th><th class="hide-sm">Cambio</th>
+  <th>Recorte</th><th>Mantener</th><th>Alza</th><th class="hide-sm">−50 pb o más</th><th class="hide-sm">−25</th><th class="hide-sm">0</th><th class="hide-sm">+25</th><th class="hide-sm">+50 o más</th></tr></thead>
+  <tbody>${rows.map(probRow).join('')}</tbody></table><p class="note" style="margin-top:10px">En las reuniones, Recorte / Mantener / Alza es la probabilidad de esa decisión; en los horizontes, de terminar abajo, igual o arriba de hoy. Las últimas cinco columnas son el cambio acumulado contra hoy. ${note}</p></div>`;
 const scen = c => RT.scenarios[c].map(z => `<tr><td>${{cut: 'Recorte', hold: 'Sin cambio', hike: 'Alza'}[z.scenario]}</td><td>${pc(z.prob)}</td>
   <td>${z.rate.toFixed(2)}%</td><td class="strong">${(z.coe * 100).toFixed(2)}%</td></tr>`).join('');
-const f0 = RT.fed[0], m0 = RT.mx[0];
+const f0 = RT.fed[0], m0 = RT.mx[0], fmtDay = d => new Date(d + 'T12:00:00Z').toLocaleDateString('es-MX', {day: 'numeric', month: 'short', timeZone: 'UTC'});
 html += sec('probabilidades', 'Probabilidades de tasas', 'Lo que descuentan futuros y opciones, reunión por reunión',
   tiles([
-    {label: `Fed ${f0.date}`, value: pc(f0.p_hike), sub: `alza · mantener ${pc(f0.p_hold)} · recorte ${pc(f0.p_cut)}`, tone: 'neutral'},
+    {label: `Fed ${fmtDay(f0.date)}: alza`, value: pc(f0.p_hike), sub: `mantener ${pc(f0.p_hold)} · recorte ${pc(f0.p_cut)} (futuros)`, tone: 'neutral'},
     {label: 'Fed a 12 meses', value: RT.horizons.US['12m'].mean.toFixed(2) + '%', sub: `± ${RT.horizons.US['12m'].sigma.toFixed(2)} pp (1σ, MOVE) · hoy ${RT.fed_current.toFixed(2)}%`},
-    m0 ? {label: `Banxico ${m0.date}`, value: pc(m0.p_hold), sub: `mantener · recorte ${pc(m0.p_cut)} · alza ${pc(m0.p_hike)}`} : {label: 'Banxico', value: '—', sub: 'sin fecha confirmada'},
+    m0 && !m0.horizon ? {label: `Banxico ${fmtDay(m0.date)}: mantener`, value: pc(m0.p_hold), sub: `recorte ${pc(m0.p_cut)} · alza ${pc(m0.p_hike)} (curva de Cetes)`} : {label: 'Banxico', value: '—', sub: 'sin fecha confirmada'},
     {label: 'Banxico a 12 meses', value: RT.horizons.MX['12m'].mean.toFixed(2) + '%', sub: `± ${RT.horizons.MX['12m'].sigma.toFixed(2)} pp · curva de Cetes`},
     {label: 'MOVE', value: RT.move.toFixed(0), sub: 'volatilidad implícita de Treasuries, pb al año', tone: RT.move > 120 ? 'bad' : 'neutral'},
     {label: 'VIX 1 mes / 3 meses', value: `${RT.vix.vix.toFixed(1)} / ${RT.vix.vix3m.toFixed(1)}`, sub: RT.vix.vix3m > RT.vix.vix ? 'curva con pendiente positiva' : 'curva invertida: estrés', tone: RT.vix.vix3m > RT.vix.vix ? 'good' : 'bad'},
@@ -955,12 +1004,12 @@ html += sec('probabilidades', 'Probabilidades de tasas', 'Lo que descuentan futu
     RT.skew ? {label: 'Sesgo SPY 25Δ', value: RT.skew.skew.toFixed(1) + ' pts', sub: `put ${RT.skew.put_iv.toFixed(1)}% vs call ${RT.skew.call_iv.toFixed(1)}%, ${RT.skew.days} días`} : {label: 'Sesgo SPY 25Δ', value: '—', sub: 'cadena de opciones no disponible'},
   ]) +
   `<div class="split">${why('Qué descuenta el mercado', D.reasons['Probabilidades'])}<div class="charts">
-  ${card('fed_probs', 'Fed: probabilidad acumulada por reunión', 'Futuros de Fed funds (CME vía Yahoo), método FedWatch. Cambio acumulado contra la tasa de hoy.')}
+  ${card('fed_probs', 'Fed: probabilidad acumulada', 'Próximas dos reuniones con el método FedWatch sobre futuros de Fed funds (CME vía Yahoo); a 3, 6 y 12 meses, distribución con la volatilidad del MOVE. Cambio acumulado contra hoy.')}
   ${card('us_dist', 'Fed: distribución de la tasa a 3, 6 y 12 meses', 'Media de los futuros y dispersión del MOVE ajustada al tramo corto.')}
   ${card('mx_probs', 'Banxico: probabilidad acumulada', 'Curva de Cetes del vector de precios menos su prima por plazo de 5 años; reuniones con fecha confirmada y horizontes.')}
   ${card('vix_term', 'Curva del VIX', 'Volatilidad implícita del S&P 500 por plazo (Cboe vía Yahoo).')}
   </div></div>
-  <h3 class="sub-h">Fed, reunión por reunión</h3>` +
+  <h3 class="sub-h">Fed</h3>` +
   probTable(RT.fed, `Tasa de referencia: fed funds efectiva ${RT.fed_current.toFixed(2)}%. Calendario oficial de la Fed para 2026–2027.` +
     (RT.sofr ? ` Comprobación con futuros de SOFR a 3 meses (${RT.sofr.month}): ${RT.sofr.sofr.toFixed(2)}% contra ${RT.sofr.fed_funds.toFixed(2)}% de los Fed funds en los mismos meses.` : '') +
     ' Cálculo propio con datos de Yahoo; no son las cifras oficiales de CME FedWatch.') +
@@ -988,9 +1037,9 @@ html += sec('comercio', 'Comercio y finanzas públicas', 'Cuentas externas, deud
 const half = f => Math.max(Math.abs(f.lo - f.now), Math.abs(f.hi - f.now), Math.abs(f.ensemble - f.now)) * 1.1 || 1;
 const at = (v, f) => (50 + (v - f.now) / half(f) * 50).toFixed(1) + '%';
 html += `<section id="pronosticos" class="tab" hidden><div class="sec-head"><h2 class="sec">Pronósticos a 12 meses</h2><span class="sub">Dos modelos, su promedio y las referencias del FMI y del mercado</span></div>
-  <div class="card table-wrap"><table><thead><tr><th>Indicador</th><th>Horizonte</th><th>Actual</th><th>Tendencia</th><th>Reversión</th><th>Promedio</th>
+  <div class="card table-wrap"><table class="compact"><thead><tr><th>Indicador</th><th class="hide-sm">Horizonte</th><th>Actual</th><th>Tendencia</th><th>Reversión</th><th>Promedio</th>
   <th>Rango 90%</th><th aria-label="Rango visual"></th><th>FMI</th><th>Mercado / consenso</th><th>Ancla propia</th></tr></thead><tbody>` + D.forecasts.map(f => `<tr>
-  <td>${esc(f.name)}</td><td>${f.horizon}</td><td>${num(f.now, f.unit)}</td><td>${num(f.drift, f.unit)}</td><td>${num(f.ar1, f.unit)}</td>
+  <td>${esc(f.name)}</td><td class="hide-sm">${f.horizon}</td><td>${num(f.now, f.unit)}</td><td>${num(f.drift, f.unit)}</td><td>${num(f.ar1, f.unit)}</td>
   <td class="strong">${num(f.ensemble, f.unit)}</td><td>${num(f.lo, f.unit)} – ${num(f.hi, f.unit)}</td>
   <td><div class="range" title="Centrado en hoy (línea blanca): rango 90% y promedio (punto)"><div class="bar" style="left:${at(f.lo, f)};width:calc(${at(f.hi, f)} - ${at(f.lo, f)})"></div>
   <div class="mk now" style="left:${at(f.now, f)}"></div><div class="mk ens" style="left:${at(f.ensemble, f)}"></div></div></td>
@@ -1106,7 +1155,7 @@ function makeChart(key) {
   const ch = new Chart(document.getElementById('c_' + key), {type: 'line', data: {datasets}, plugins: [crosshair], options: opts});
   ch.$meta = {unit: c.unit, title: c.title, daily: c.daily};
   const hist = c.lines.find(l => l.role === 'hist').points;
-  track(ch, xs, hist[hist.length - 1][0], c.daily);
+  track(ch, xs, hist[hist.length - 1][0], c.daily, c.auto_from);
 }
 
 function base({bar, unit}) {
@@ -1114,7 +1163,7 @@ function base({bar, unit}) {
   return {
     maintainAspectRatio: false, animation: false, normalized: true,
     interaction: bar ? {mode: 'index', intersect: false} : {mode: 'nearest', axis: 'x', intersect: false},
-    layout: {padding: {top: 4, right: 14}},
+    layout: {padding: {top: 4, right: 26}},
     scales: {
       x: bar ? {grid: {display: false}, border: {color: C.axis}, ticks: {...tick, autoSkip: false, maxRotation: 90, minRotation: 0}}
              : {type: 'linear', grid: {display: false}, border: {color: C.axis}, ticks: {...tick, maxTicksLimit: 6, callback(v) {
@@ -1133,14 +1182,15 @@ function base({bar, unit}) {
 let range = 'auto';
 const timed = [];
 const MONTH = 30.44 * 864e5;
-function windowFor(r, last, xmin, xmax, daily) {
+function windowFor(r, last, xmin, xmax, daily, autoFrom) {
   const k = r === 'auto' ? (daily ? '1y' : 'all') : r;
-  if (k === 'all') return [xmin, xmax];
+  if (k === 'all') return [r === 'auto' && autoFrom ? Math.max(xmin, autoFrom) : xmin, xmax];
   const lo = k === 'ytd' ? Date.UTC(new Date(last).getUTCFullYear(), 0, 1) : last - {'1m': 1, '3m': 3, '6m': 6, '1y': 12, '5y': 60}[k] * MONTH;
-  return [Math.max(lo, xmin), Math.min(xmax, last + Math.max(last - lo, MONTH))];
+  // The forecast gets at most half as much room as the history shown.
+  return [Math.max(lo, xmin), Math.min(xmax, last + Math.max((last - lo) / 2, MONTH))];
 }
 function applyRange(t) {
-  const [lo, hi] = windowFor(range, t.last, t.xmin, t.xmax, t.daily), ys = [];
+  const [lo, hi] = windowFor(range, t.last, t.xmin, t.xmax, t.daily, t.autoFrom), ys = [];
   t.chart.data.datasets.forEach(d => d.data.forEach(p => { if (p.x >= lo && p.x <= hi && p.y != null) ys.push(p.y); }));
   const ymin = Math.min(...ys), ymax = Math.max(...ys);
   // Round the y bounds to a 1-2-5 step so the end ticks read as round numbers.
@@ -1150,8 +1200,8 @@ function applyRange(t) {
   Object.assign(t.chart.options.scales.y, {min: Math.floor(ymin / step) * step, max: Math.ceil(ymax / step) * step});
   t.chart.update('none');
 }
-function track(chart, xs, last, daily) {
-  const t = {chart, last, daily, xmin: Math.min(...xs), xmax: Math.max(...xs)};
+function track(chart, xs, last, daily, autoFrom) {
+  const t = {chart, last, daily, autoFrom, xmin: Math.min(...xs), xmax: Math.max(...xs)};
   timed.push(t); applyRange(t);
 }
 document.querySelectorAll('.ranges button').forEach(b => b.addEventListener('click', () => {
@@ -1167,6 +1217,8 @@ const tabs = [...document.querySelectorAll('section.tab')], links = [...document
 function show(id) {
   const tab = tabs.find(t => t.id === id) || tabs[0];
   tabs.forEach(t => { t.hidden = t !== tab; });
+  // The period selector only acts on time charts: hide it on tabs that have none.
+  document.querySelector('.ranges').hidden = ['resumen', 'pronosticos', 'valuacion'].includes(tab.id);
   links.forEach(a => { const on = a.getAttribute('href') === '#' + tab.id; a.classList.toggle('on', on); a.setAttribute('aria-selected', on); });
   if (built.has(tab.id)) return; built.add(tab.id);
   setTimeout(() => {  // after the tab is laid out; a timer, not rAF, so a background tab still builds

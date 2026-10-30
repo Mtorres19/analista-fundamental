@@ -41,19 +41,19 @@ SERIES: dict[str, dict[str, tuple[str, str, int]]] = {
         "gdp": ("fred", "GDPC1", 120),                 # real GDP, quarterly
     },
     "MX": {
-        "rate_10y": ("fred", "IRLTLT01MXM156N", 45),   # 10y government bond, %, monthly (OECD)
+        "rate_10y": ("vector", "M10", 1),              # Bono M 7-10y bucket, yield from Banxico's daily price vector
         "policy_rate": ("banxico", "SF61745", 1),      # Banxico target rate, %
         "cpi": ("banxico", "SP1", 25),                 # INPC index, biweekly/monthly
         "unemployment": ("fred", "LRHUTTTTMXM156S", 60),  # %, monthly (OECD)
         "gdp": ("fred", "NGDPRSAXDCMXQ", 150),         # real GDP, quarterly
-        "fx_usd": ("fred", "DEXMXUS", 1),              # pesos per dollar, daily
+        "fx_usd": ("banxico", "SF43718", 1),           # pesos per dollar, Banxico FIX, daily (FRED's lags a week)
         "reer": ("fred", "RBMXBIS", 75),               # BIS real broad effective exchange rate, monthly; up = stronger
     },
     "GLOBAL": {
         "vix": ("fred", "VIXCLS", 1),                  # S&P 500 implied vol
         "dollar": ("fred", "DTWEXBGS", 1),             # broad trade-weighted dollar
         "brent": ("fred", "DCOILBRENTEU", 1),          # Brent, USD/bbl
-        "copper": ("fred", "PCOPPUSDM", 45),           # copper, USD/t, monthly
+        "copper": ("yahoo", "HG=F", 1),                # COMEX copper future, USD per pound, daily
     },
     # Curves: tenor -> yield in %. Tenor keys end in d/m/y so markets.py can place them in years.
     "US_CURVE": {t: ("fred", sid, 1) for t, sid in (
@@ -101,8 +101,6 @@ SERIES: dict[str, dict[str, tuple[str, str, int]]] = {
         "reserves": ("banxico", "SF43707", 7),           # USD mn, weekly
         "igae": ("banxico", "SR17692", 60),              # activity index, base 2018
     },
-    # Daily prices for the market charts where the macro series is monthly.
-    "DAILY": {"copper": ("yahoo", "HG=F", 1)},     # COMEX copper future, USD per pound
     "RISK": {
         "em_corp_oas": ("fred", "BAMLEMCBPIOAS", 1),     # ICE BofA EM corporate OAS, pp; Mexico's default spread proxy
         "us_hy_oas": ("fred", "BAMLH0A0HYM2", 1),        # ICE BofA US high yield OAS, pp
@@ -155,6 +153,8 @@ def fetch(source: str, series_id: str) -> pd.Series:
         return parse_damodaran_erp(_get(DAMODARAN_ERP).content, series_id)
     if source == "yahoo_curve":
         return _yahoo_curve(series_id)
+    if source == "vector":
+        return _vector_ytm(series_id)
     raise ValueError(f"unknown source {source!r}")
 
 
@@ -269,6 +269,16 @@ def _yahoo(ticker: str) -> pd.Series:
     close = close.iloc[:, 0] if isinstance(close, pd.DataFrame) else close
     close.index = pd.DatetimeIndex(close.index).tz_localize(None)
     return close.dropna()
+
+
+def _vector_ytm(bucket: str) -> pd.Series:
+    """Daily yield to maturity of one Banxico price-vector bucket (e.g. 'M10'), from its dirty price and coupon."""
+    from macro.markets import ytm  # markets imports this module
+
+    df = pd.concat({f: fetch(*SERIES["MX_VECTOR"][f"{bucket}_{f}"][:2]) for f in ("plazo", "sucio", "cupon")}, axis=1).dropna()
+    if df.empty:
+        raise DataError(f"Banxico vector {bucket}: no prices")
+    return pd.Series(ytm(df["sucio"], df["cupon"], df["plazo"]), index=df.index).dropna()
 
 
 def _yahoo_curve(root: str) -> pd.Series:

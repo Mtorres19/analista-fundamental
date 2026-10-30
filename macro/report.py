@@ -61,7 +61,7 @@ def render(r: MacroReport) -> str:
     for snap, cmp in ((r.us, r.vs_imf[0]), (r.mx, r.vs_imf[1])):
         name = "Estados Unidos" if snap.country == "US" else "México"
         lines += [f"## {name}", "",
-                  f"- Régimen: **{snap.regime}**",
+                  f"- Régimen: **{ {'goldilocks': 'goldilocks', 'reflation': 'reflación', 'stagflation': 'estanflación', 'slowdown': 'desaceleración'}[snap.regime]}**",
                   f"- Crecimiento: PIB real {_pct(snap.gdp_yoy)} anual vs tendencia {_pct(snap.gdp_trend)} "
                   f"(FMI {cmp.year}: {_pct(cmp.gdp_imf)})",
                   f"- Inflación: {_pct(snap.inflation_yoy)} (hace 6m {_pct(snap.inflation_yoy_6m_ago)}; "

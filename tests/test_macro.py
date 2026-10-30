@@ -4,11 +4,11 @@ import pytest
 from macro import sources
 from macro.report import build_report, render
 
-LEVELS = {"DGS10": 4.2, "DFF": 4.3, "T10YIE": 2.3, "BAA10Y": 1.8, "IRLTLT01MXM156N": 9.0,
+LEVELS = {"DGS10": 4.2, "DFF": 4.3, "T10YIE": 2.3, "BAA10Y": 1.8, "M10": 9.0,
           "SF61745": 8.0, "LRHUTTTTMXM156S": 2.8, "UNRATE": 4.0, "VIXCLS": 18.0}
 # Index series and their annual growth rate.
 GROWING = {"CPIAUCSL": 0.03, "SP1": 0.04, "GDPC1": 0.02, "NGDPRSAXDCMXQ": 0.01,
-           "DEXMXUS": 0.0, "DTWEXBGS": 0.0, "DCOILBRENTEU": 0.0, "PCOPPUSDM": 0.0}
+           "SF43718": 0.0, "DTWEXBGS": 0.0, "DCOILBRENTEU": 0.0}
 
 
 # Curves: an inverted Treasury curve (3m 5.0 > 10y 4.2), real 10y above 2%, a normal Mexican curve.
@@ -57,7 +57,7 @@ def fake_fetch(source: str, sid: str) -> pd.Series:
             s[s.index >= "2026-06-01"] *= 0.8
         return s
     per_year = 4 if quarterly else 12
-    base = 18.0 if sid == "DEXMXUS" else 100.0
+    base = 18.0 if sid == "SF43718" else 100.0
     return pd.Series([base * (1 + GROWING[sid]) ** (i / per_year) for i in range(len(idx))], index=idx)
 
 
@@ -242,10 +242,10 @@ def test_neutral_rate_and_stance(report):
     assert us.rstar == pytest.approx((2.0 + 1.8) / 2, abs=1e-6)
     assert us.gap == pytest.approx(4.3 - 3.9, abs=1e-6) and us.stance == "cerca de neutral"
     assert us.external == pytest.approx(0.8)
-    # MX: trend 1%, real = 8.0 - 4.0 inflation = 4.0 -> r* 2.5, nominal 5.5, policy 8.0: restrictive.
-    assert mx.rstar == pytest.approx(2.5, abs=1e-6) and mx.stance == "restrictiva"
-    # Taylor: 5.5 nominal + 0.5 x (4.0 - 3.0) inflation gap + 0 (unemployment at its average) = 6.0.
-    assert mx.taylor == pytest.approx(6.0, abs=1e-6)
+    # MX: trend 1%, real = 8.0 - 4.1 survey expectation = 3.9 -> r* 2.45, nominal 5.45, policy 8.0: restrictive.
+    assert mx.rstar == pytest.approx(2.45, abs=1e-6) and mx.stance == "restrictiva"
+    # Taylor: 5.45 nominal + 0.5 x (4.0 - 3.0) inflation gap + 0 (unemployment at its average) = 5.95.
+    assert mx.taylor == pytest.approx(5.95, abs=1e-6)
     path = mx.path(pd.date_range("2026-07-01", periods=12, freq="MS"))
     assert path.iloc[-1] == pytest.approx(mx.taylor + (mx.policy - mx.taylor) / 2)   # the distance halves in a year
     idx = pd.date_range("2020-01-01", periods=12, freq="MS")
@@ -331,3 +331,22 @@ def test_cetes_forwards_and_buckets():
     assert f[0] == (0, 28, 7.0) and f[1][2] == pytest.approx((g2 / g1 - 1) * 360 / 63 * 100)   # simple yields: forward a bit lower
     b = normal_buckets(4.0, 0.25, 4.0)
     assert sum(b.values()) == pytest.approx(1.0) and b[1] == pytest.approx(b[-1]) and b[0] > b[1]
+
+
+def test_country_risk_compares_the_real_spread(report):
+    from macro.markets import build_markets, country_risk_text
+    m = build_markets(report, fake_fetch)
+    # Udibono 10y 4.2% (par) minus TIPS 10y 2.2% = 2.0 pp real; nominal Bono M 9.0 - Treasury 4.2 = 4.8 pp.
+    assert m.mx_real_spread_10y == pytest.approx(2.0, abs=1e-4)
+    assert "conservador" in country_risk_text(m, 3.0)          # 3.0 pp CRP > 2.0 real: conservative
+    assert "optimista" in country_risk_text(m, 1.5)
+    assert "4.80 pp" in country_risk_text(m, 3.0)              # the nominal one is still shown, as context
+
+
+def test_global_flags_print_the_actual_move():
+    from macro.snapshot import GlobalSnapshot
+    w = GlobalSnapshot(as_of="2026-10-29", year=2026, vix=20, dollar_yoy=0.08, brent_yoy=0.88, copper_yoy=-0.15,
+                       g20_growth_median=0.02, g20_breadth=0.5, growth={}, inflation={})
+    flags = " | ".join(w.flags)
+    assert "petróleo +88% anual" in flags and "+25%" not in flags
+    assert "dólar fuerte (+8.0% anual)" in flags and "cobre cayendo -15.0% anual" in flags
