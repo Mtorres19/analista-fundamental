@@ -2,7 +2,8 @@ name: Dashboard
 
 on:
   schedule:
-    - cron: "0 13-23 * * 1-5"   # cada hora en días hábiles, 7 a 17 h de Ciudad de México
+    # GitHub retrasa o descarta los cron en punto (minuto 0); un minuto poco usado se respeta mejor.
+    - cron: "23 13-23 * * 1-5"  # cada hora en días hábiles, 7 a 17 h de Ciudad de México
   workflow_dispatch:
   push:
     branches: [main]
