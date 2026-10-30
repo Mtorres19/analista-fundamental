@@ -1,7 +1,8 @@
 """Two-stage FCFF DCF (Damodaran), priced off the macro layer's assumptions, plus comparables and a verdict.
 
-Stage 1 (years 1-5): revenue grows at the recent 3-year CAGR (capped), operating margin at its 3-year average,
-effective tax rate. Years 6-10: growth fades linearly to the terminal rate and tax to the marginal rate.
+Stage 1 (high_years, default 5): revenue grows at the recent growth (capped), operating margin at its 3-year
+average, effective tax rate. Then fade_years (default 5): growth fades linearly to the terminal rate and tax to the
+marginal rate. Both are per-company settings in watchlist.toml for firms whose investment buys a longer runway.
 Reinvestment = revenue change / sales-to-capital (the company's own last 3 years). Terminal: growth = the macro
 layer's terminal growth (capped at the local 10y), reinvestment = g / terminal ROIC.
 Discount rate: WACC with the cost of equity from MarketAssumptions.cost_of_equity(beta) and a synthetic-rating cost
@@ -19,7 +20,6 @@ from pydantic import BaseModel
 from equity.data import Financials, Market
 from macro.assumptions import MarketAssumptions
 
-YEARS, FADE_FROM = 10, 5
 MARGINAL_TAX = {"USD": 0.25, "MXN": 0.30}     # federal + state in the US (Damodaran's 25%); ISR in Mexico
 GROWTH_CAP = (-0.05, 0.25)
 SALES_TO_CAPITAL_CAP = (0.5, 5.0)
@@ -48,6 +48,8 @@ class Inputs(BaseModel):
     debt: float
     shares: float
     price: float
+    high_years: int = 5         # years at full growth, then...
+    fade_years: int = 5         # ...years fading linearly to terminal growth
 
 
 class Year(BaseModel):
@@ -149,8 +151,8 @@ def project(x: Inputs) -> tuple[list[Year], float, float, float]:
     if x.wacc <= x.terminal_growth:
         raise ValueError(f"WACC {x.wacc:.2%} must exceed terminal growth {x.terminal_growth:.2%}")
     years, rev, pv = [], x.revenue, 0.0
-    for t in range(1, YEARS + 1):
-        k = max(0, t - FADE_FROM) / (YEARS - FADE_FROM)     # 0 through year 5, 1 at year 10
+    for t in range(1, x.high_years + x.fade_years + 1):
+        k = max(0, t - x.high_years) / x.fade_years     # 0 through the high-growth years, 1 at the last year
         g = x.growth + (x.terminal_growth - x.growth) * k
         tax = x.tax_effective + (x.tax_marginal - x.tax_effective) * k
         new = rev * (1 + g)
