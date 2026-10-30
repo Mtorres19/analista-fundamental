@@ -199,6 +199,23 @@ def test_dashboard_page():
     assert {"US_infl", "MX_fx", "brent", "vix"} <= data["charts"].keys()
     assert all(f["ensemble"] is not None for f in data["forecasts"])
     assert "Régimen" in data["reasons"]["México"][0]
+    assert {"changes", "calendar", "answers", "answer_list"} <= data.keys()
+    assert all(k["d1"] is not None for k in data["kpis"]["México"] if k["label"] == "Peso por dólar")
+    assert all(e["date"] >= "2026-06-30" for e in data["calendar"])
+    # phase 1 areas with content; the router builds the navigation from these
+    for area in ("hoy", "macro", "tasas", "fx", "mercados", "empresas"):
+        assert f"AREAS.push({{id: '{area}'" in page
+    for old in ("resumen", "mundo", "eeuu", "mexico", "curvas", "probabilidades", "mercados", "comercio", "pronosticos", "valuacion"):
+        assert f"{old}:" in page.split("const OLD_HASH")[1].split("}")[0]
+
+
+def test_delta_of_growing_series():
+    from macro.site.payload import _changes, _delta
+    s = pd.Series([1.0, 1.1, 1.0, 1.1, 1.2, 1.5], index=pd.date_range("2026-01-31", periods=6, freq="MS"))
+    d = _delta(s, " pp")
+    assert d["d1"] == pytest.approx(0.3) and d["d30"] == pytest.approx(0.3) and d["z"] > 1
+    assert _changes({"EE.UU.": [{"label": "x", "value": "1", **d}, {"label": "y", "value": "2"}]})[0]["label"] == "x"
+    assert _delta(s[:2], "") == {}
 
 
 def test_yoy_pct_skips_missing_month():
