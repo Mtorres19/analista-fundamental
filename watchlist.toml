@@ -1,0 +1,32 @@
+# Lista de seguimiento: python -m equity lista
+# mercado: US (estados financieros de la SEC) o MX (Yahoo Finance). comparables: tickers de Yahoo.
+# supuestos (opcional): reemplaza los del modelo, p. ej. supuestos = { growth = 0.12, margin = 0.30 }
+# high_years / fade_years: años de crecimiento pleno y años en que converge al terminal (5 y 5 por omisión).
+# financiera = true: bancos y aseguradoras, que no se valúan con flujo libre.
+
+[GOOGL]
+mercado = "US"
+sector = "Servicios de comunicación"
+comparables = ["MSFT", "META", "AMZN", "AAPL"]
+# El capex de IA (~200 mil millones en 2026) compra una pista de crecimiento más larga: 10 años de convergencia.
+supuestos = { fade_years = 10 }
+
+[MSFT]
+mercado = "US"
+sector = "Tecnología"
+comparables = ["GOOGL", "AAPL", "ORCL", "AMZN"]
+
+[WALMEX.MX]
+mercado = "MX"
+sector = "Consumo básico"
+comparables = ["WMT", "SORIANAB.MX", "CHDRAUIB.MX"]
+
+[AMXB.MX]
+mercado = "MX"
+sector = "Servicios de comunicación"
+comparables = ["TEF", "VZ", "T", "TIMB"]
+
+[GFNORTEO.MX]
+mercado = "MX"
+sector = "Financiero"
+financiera = true
