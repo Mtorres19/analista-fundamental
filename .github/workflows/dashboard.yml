@@ -31,6 +31,12 @@ jobs:
         run: python -m macro check || true
         env:
           BANXICO_TOKEN: ${{ secrets.BANXICO_TOKEN }}
+      - name: Valuar empresas
+        # Sale con error si una emisora falla (los bancos siempre: no hay DCF de flujo libre); el resto sí se publica.
+        run: python -m equity lista --out reportes/empresas || true
+        env:
+          BANXICO_TOKEN: ${{ secrets.BANXICO_TOKEN }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
       - name: Generar dashboard
         run: python -m macro dashboard --out site/index.html
         env:

@@ -97,3 +97,28 @@ def test_ttm_base_and_report_is_spanish_markdown():
     for h in ("# Test Inc (TEST):", "## Tesis", "## Valuación", "## Salud financiera", "## Sensibilidad", "## Riesgos"):
         assert h in text
     assert not re.search(r"\bnan\b", text.lower())
+
+
+def test_companies_ranking_reads_the_latest_valuation(tmp_path):
+    from macro.site.payload import _companies
+    peers = {"P1": {"pe": 20.0, "ev_ebitda": 15.0}, "P2": {"pe": 30.0, "ev_ebitda": 25.0}}
+    mkt = MKT.model_copy(update={"multiples": {"pe": 18.0, "ev_ebitda": 16.0}})
+    old = value(FIN, mkt.model_copy(update={"price": 50.0}), A, "2026-10-01", peers=peers)
+    new = value(FIN, mkt, A, "2026-10-30", peers=peers)
+    cheap = value(FIN.model_copy(update={"ticker": "CHEAP"}), mkt.model_copy(update={"price": 10.0}), A, "2026-10-30")
+    for v in (old, new, cheap):
+        (tmp_path / f"{v.ticker}-{v.as_of}.json").write_text(v.model_dump_json())
+    rows = _companies(tmp_path, {"TEST": {"sector": "Tecnología"}, "CHEAP": {"mercado": "MX"}})
+    assert [r["ticker"] for r in rows] == ["CHEAP", "TEST"]       # ranked by upside
+    test = rows[1]
+    assert test["as_of"] == "2026-10-30" and test["price"] == 150.0 and test["sector"] == "Tecnología"
+    assert test["vs_peers"] == pytest.approx(16 / 20 - 1)       # 20% under the peers' median EV/EBITDA
+    assert rows[0]["market"] == "MX" and rows[0]["vs_peers"] is None
+    assert _companies(tmp_path, {}) == []                        # off the watchlist, off the ranking
+
+
+def test_watchlist_entries_are_whole_tickers():
+    import tomllib
+    from equity.__main__ import WATCHLIST
+    watch = tomllib.loads(WATCHLIST.read_text())
+    assert all(c.get("mercado") in ("US", "MX") for c in watch.values()), "un ticker con punto sin comillas"

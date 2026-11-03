@@ -125,6 +125,11 @@ derecha (la clase `.split` actual), tablas al final.
 - `macro/valuation.py` (o un paquete `equity/`): DCF de 2 etapas con `assumptions.cost_of_equity()` y crecimiento
   terminal de `assumptions`, comparables del mismo sector, margen de seguridad, veredicto
   (comprar / mantener / vender) con sus razones.
+- Ranking (`empresas/lista`, hecho): `payload._companies` lee el JSON más reciente de cada emisora en
+  `reportes/empresas` (lo escribe `python -m equity lista`, que el workflow corre antes del dashboard) y ordena por
+  upside del DCF; filtros por mercado y orden por upside, EV/EBITDA contra la mediana de comparables o P/U. Sin lista
+  de comparables, una emisora usa las demás de su sector en `watchlist.toml`. El precio objetivo del consenso se
+  muestra solo como comparación.
 - Ficha: veredicto y precio objetivo, tesis en tres líneas, valuación (rango DCF y comparables), salud financiera,
   sensibilidad a tasas y peso (betas de fase 2), riesgos.
 

@@ -42,7 +42,11 @@ def main() -> None:
     failed = 0
     for t in tickers:
         try:
-            _one(t, watch.get(t, {}), macro, args.date, Path(args.out), overrides)
+            cfg = watch.get(t, {})
+            # Without a comparables list, the other non-financial companies of the same sector in the list.
+            peers = cfg.get("comparables") or [o for o, c in watch.items() if o != t and not c.get("financiera")
+                                               and c.get("sector") == cfg.get("sector")]
+            _one(t, {**cfg, "comparables": peers}, macro, args.date, Path(args.out), overrides)
         except (DataError, ValueError) as exc:
             failed += 1
             print(f"{t}: {exc}", file=sys.stderr)

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import math
+import statistics
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -383,3 +386,32 @@ def _answers(reasons: dict[str, list[str]]) -> tuple[dict[str, str], list[dict]]
                "indices": first("Mercados"), "supuestos": first("Supuestos"), "nivel": first("México", "peso")}
     by_view = {k: v for k, v in by_view.items() if v}
     return by_view, [{"name": n, "text": by_view[v], "href": h} for n, v, h in ANSWER_AREAS if v in by_view]
+
+
+def _companies(folder: Path, watch: dict[str, dict]) -> list[dict]:
+    """One row per company in the watchlist with a valuation (python -m equity lista), the latest file of each,
+    ranked by DCF upside. The consensus target is carried for comparison only."""
+    latest = {}
+    for p in sorted(Path(folder).glob("*.json")):   # names end in the date, so the last one read is the newest
+        v = json.loads(p.read_text(encoding="utf-8"))
+        latest[v["ticker"]] = v
+    rows = []
+    for t, v in latest.items():
+        if t not in watch:   # taken off the list
+            continue
+        own, cons = v.get("multiples") or {}, v.get("consensus") or {}
+        peer = {k: statistics.median(xs) if (xs := [p[k] for p in v["peers"].values() if p.get(k)]) else None
+                for k in ("ev_ebitda", "pe")}
+        target = cons.get("target_median") or cons.get("target_mean")
+        price = v["inputs"]["price"]
+        rows.append({
+            "ticker": t, "name": v["name"], "sector": watch[t].get("sector", ""), "market": watch[t].get("mercado", "US"),
+            "currency": v["currency"], "as_of": v["as_of"], "price": price, "value": v["value_per_share"],
+            "upside": v["upside"], "verdict": v["verdict"], "growth": v["inputs"]["growth"], "implied_growth": v["implied_growth"],
+            "wacc": v["inputs"]["wacc"], "pe": own.get("pe"), "pe_fwd": own.get("pe_fwd"), "ev_ebitda": own.get("ev_ebitda"),
+            "peer_ev_ebitda": peer["ev_ebitda"], "peer_pe": peer["pe"],
+            # Below 0: cheaper than its comparables on EV/EBITDA.
+            "vs_peers": own["ev_ebitda"] / peer["ev_ebitda"] - 1 if own.get("ev_ebitda") and peer["ev_ebitda"] else None,
+            "target": target, "target_upside": target / price - 1 if target else None,
+        })
+    return sorted(rows, key=lambda r: -r["upside"])
