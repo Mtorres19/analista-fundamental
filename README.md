@@ -24,8 +24,12 @@ export BANXICO_TOKEN=...   # gratis: https://www.banxico.org.mx/SieAPIRest/servi
 python -m macro check                       # prueba que cada serie responda
 python -m macro report                      # panorama de hoy
 python -m macro dashboard                   # página con gráficas, razones y pronósticos (reportes/dashboard.html); código en macro/site/ (payload Python + assets HTML/CSS/JS)
+export SEC_USER_AGENT="analista-fundamental tu@correo.com"   # la SEC exige nombre y correo
+python -m equity lista                      # valúa watchlist.toml (reportes/empresas); el dashboard arma con eso Empresas > Ranking
 python -m macro report --date 2025-12-31 --erp 0.055 --out reportes/2025-12.md
 pytest
 ```
+
+En GitHub Actions, `BANXICO_TOKEN` y `SEC_USER_AGENT` son secretos del repositorio.
 
 Las series y sus IDs están en `macro/sources.py` (`SERIES`). Si `check` marca una como FALLA, ahí se cambia.

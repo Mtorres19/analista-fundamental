@@ -85,6 +85,7 @@ class Valuation(BaseModel):
     history: dict[str, list]    # fiscal years, revenue, margin for the report
     ttm_end: str | None = None  # quarter end of the trailing-twelve-month base, when there is one
     consensus: Consensus | None = None
+    multiples: dict[str, float | None] = {}   # the company's own P/E, EV/EBITDA... as Yahoo reports them
 
 
 def value(f: Financials, m: Market, a: MarketAssumptions, as_of: str, peers: dict | None = None,
@@ -103,7 +104,7 @@ def value(f: Financials, m: Market, a: MarketAssumptions, as_of: str, peers: dic
         comparables=comparables(f, x, peers), implied_growth=implied_growth(x), peers=peers, health=health(f),
         sensitivity={f"{dw * 100:+.0f} pp": {f"{dg * 100:+.0f} pp": round(_rerun(x, wacc=x.wacc + dw, growth=x.growth + dg), 2)
                                    for dg in (-0.05, 0.0, 0.05)} for dw in (-0.01, 0.0, 0.01)},
-        ttm_end=f.ttm_end if "revenue" in f.ttm else None, consensus=consensus,
+        ttm_end=f.ttm_end if "revenue" in f.ttm else None, consensus=consensus, multiples=m.multiples,
         history={"years": f.fiscal_years, "revenue": f.items["revenue"],
                  "margin": [e / r if e is not None and r else None for e, r in zip(f.items["ebit"], f.items["revenue"])]},
     )

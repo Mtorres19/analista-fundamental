@@ -7,8 +7,10 @@ an HTML skeleton, one stylesheet and the scripts, with the data embedded in <scr
 from __future__ import annotations
 
 import json
+import tomllib
 from datetime import datetime
 from functools import cache
+from pathlib import Path
 from importlib.resources import files
 from zoneinfo import ZoneInfo
 
@@ -24,13 +26,14 @@ from macro.markets import reasons as market_reasons
 from macro.neutral import build_neutral
 from macro.policy import build_rates
 from macro.report import WeoFetch, build_report
-from macro.site.payload import (_along, _answers, _calendar, _changes, _chart, _economy_payload, _imf_points, _kpis,
+from macro.site.payload import (_along, _companies, _answers, _calendar, _changes, _chart, _economy_payload, _imf_points, _kpis,
                                 _markets_payload, _neutral_rows, _rate_flags, _rates_payload, _recent, _specs, _summary, _with_deltas,
                                 _at_horizon, _yoy_pct)
 from macro.site.reasons import _rate_reasons, reasons
 from macro.snapshot import _monthly
 
 ASSETS = files("macro.site") / "assets"
+WATCHLIST = Path(__file__).resolve().parents[2] / "watchlist.toml"
 # Scripts are concatenated in this order; an area that has no file yet simply is not in the navigation.
 JS_ORDER = ["core.js", "components.js", *(f"areas/{a}.js" for a in ("hoy", "macro", "tasas", "fx", "mercados", "sectores", "empresas", "reportes")), "router.js"]
 
@@ -44,7 +47,9 @@ def _js() -> str:
 
 
 def build_dashboard(as_of: str, erp: float | None = None, fetch: sources.Fetch = sources.fetch,
-                    weo_fetch: WeoFetch = sources.imf_weo, options=sources.option_chain) -> str:
+                    weo_fetch: WeoFetch = sources.imf_weo, options=sources.option_chain,
+                    companies: str | Path = "reportes/empresas") -> str:
+    """companies: folder with the JSON valuations of python -m equity lista (empty or missing: no ranking)."""
     fetch, weo_fetch = cache(fetch), cache(weo_fetch)  # the report and the charts read the same series once
     r = build_report(as_of, erp=erp, fetch=fetch, weo_fetch=weo_fetch)
     m = build_markets(r, fetch)
@@ -157,6 +162,7 @@ def build_dashboard(as_of: str, erp: float | None = None, fetch: sources.Fetch =
                          "erp": a.equity_risk_premium, "crp": a.country_risk_premium,
                          "infl": a.expected_inflation, "g": a.terminal_growth, "coe": a.cost_of_equity()}
                         for a in r.assumptions],
+        "companies": _companies(Path(companies), tomllib.loads(WATCHLIST.read_text()) if WATCHLIST.is_file() else {}),
         "flags": {"Mundo": r.world.flags + m.flags["Mundo"] + e.flags["Mundo"],
                   "EE.UU.": r.us.flags + r.vs_imf[0].flags + m.flags["EE.UU."] + e.flags["EE.UU."] + _rate_flags(rates),
                   "México": r.mx.flags + r.vs_imf[1].flags + r.mx_extras.flags + m.flags["México"] + e.flags["México"]},
